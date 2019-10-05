@@ -299,17 +299,19 @@ class PointerGenerator(nn.Module):
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
         
         logits = []
-        
+        tgtlen = tgt.shape[1]
         for i in range(self.output_len):
             # 3 dimensional
-            ans_emb = self.emb_layer(tgt[:,i:]) #(batch, 1, emb)
+            cand = ys[:,-1:]#tgt[:,i:i+1] if i<tgtlen else ys[:,-1:]
+            
+            ans_emb = self.emb_layer(cand) #(batch, 1, emb)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c)) #(batch, 1, 2hidden)
             
             attention = torch.matmul(out, memory.transpose(-1, -2)) #(batch, 1, srclen)
             attention = F.softmax(attention, dim=-1)
             
             context_vector = torch.matmul(attention, memory) #(batch, 1, 2hidden)
-
+            
             pointer_prob = torch.zeros((batch_size, self.voc_size)).type_as(attention)
             pointer_prob = pointer_prob.scatter_add_(dim=1, index=x, src=attention.squeeze())
             

@@ -29,13 +29,13 @@ lm_path = "trainedELMo/Model5"
 vocab = json.load(open(vocab_path))
 VOCAB_SIZE = len(vocab)
 INPUT_LEN = 50
-OUTPUT_LEN = 20
+OUTPUT_LEN = 50
 
 
 # In[4]:
 
 
-training_set = Dataset(valid_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD]) #train_seq
+training_set = Dataset(train_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD]) #train_seq
 validation_set = Dataset(valid_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD])
 
 
@@ -103,7 +103,7 @@ def tstring(reward):
 
 # In[ ]:
 
-criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD], reduction="none").to(device)
+criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD], reduction="mean").to(device)
 
 for e in range(start, epochs+1):
     translator.train()
@@ -114,26 +114,25 @@ for e in range(start, epochs+1):
     losses = []
     for src, tgt in trange:
         bsize, slen = src.shape[:2]
-        tgt = src.to(device)
-        src = src[:,torch.randperm(slen)].to(device)
+        tgt = src.clone()
+        src = src[:,torch.randperm(slen)]
+        
+        src = src.to(device)
+        tgt = tgt.to(device)
         
         src_mask = None#(src != vocab[PAD]).unsqueeze(-2)
 
         ys, log_p = translator.forward_teacher(
-            src=src, src_mask=src_mask, tgt, max_len=OUTPUT_LEN, start_symbol=vocab[BOS])
+            src=src, src_mask=src_mask, tgt=tgt, max_len=OUTPUT_LEN, start_symbol=vocab[BOS])
                 
         loss = criterion(log_p.view(-1, VOCAB_SIZE), tgt.view(-1))
         # (batch x OUTPUT_LEN)
-
-        first_loss = loss.view(bsize, OUTPUT_LEN)[0].mean()
-        loss = loss.mean()
 
         ### logging        
         wandb.log({
             "input":id2sent(src[0].cpu().numpy()),
             "output":id2sent(ys[0].cpu().numpy()),
             "target":id2sent(tgt[0].cpu().numpy()),
-            "loss":first_loss, 
             "batch loss":loss.item(),
                   })
         ###########
@@ -155,5 +154,5 @@ for e in range(start, epochs+1):
         
     print("Epoch train loss:", np.mean(loss_history))
         
-    get_ipython().system('mkdir -p trained')
-    torch.save({"model":translator.state_dict(), "loss":loss_history}, "trained/Model"+str(e))
+    get_ipython().system('mkdir -p pretrained')
+    torch.save({"model":translator.state_dict(), "loss":loss_history}, "pretrained/Model"+str(e))
