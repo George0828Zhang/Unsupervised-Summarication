@@ -66,6 +66,7 @@ class ContextMatcher(nn.Module):
         return embeddings['elmo_representations'][0]
 
     def language_model(self, t):
+#         return torch.log(self.LM.inference(t)+self.eps)
         return self.LM.inference(t)
 
 
@@ -76,15 +77,25 @@ class ContextMatcher(nn.Module):
         x_reps = self.elmo_embed(x) # (batch, xlen, emb)
         y_reps = self.elmo_embed(y) # (batch, ylen, emb)
 
-        # l2-norm on embedding dim
-        x_reps = F.normalize(x_reps, p=2, dim=2) 
-        y_reps = F.normalize(y_reps, p=2, dim=2) 
+        # l2-norm on last embedding
+        x_reps = F.normalize(x_reps[:,-1:,:], p=2, dim=-1) 
+        y_reps = F.normalize(y_reps[:,-1:,:], p=2, dim=-1) # (batch, 1, emb)
+
+        cosine = torch.matmul(y_reps, x_reps.transpose(-2, -1)) # (batch, 1, 1) 
+
+#         # this corresponds to log(Pcm(y|x))
+#         full_rw = F.logsigmoid(cosine) # (batch, 1, 1) 
         
-        cosine = torch.matmul(y_reps, x_reps.transpose(-2, -1)) # (batch, ylen, xlen)     
-        # is softmax needed though? probably not because this is not meant to be a distribution
+#         # assign each reward to log(Pcm(y|x))/N
+#         reward = (full_rw/seqlen).repeat(1, seqlen, 1)
+#         return reward.squeeze() # (batch, seq) 
+
+        # this corresponds to (Pcm(y|x))
+        full_rw = F.sigmoid(cosine) # (batch, 1, 1) 
         
-        # since minimum score is -1
-        return cosine[:,:,-1] + 1
+        # assign each reward to (Pcm(y|x))^(1/N)
+        reward = (full_rw**(1/seqlen)).repeat(1, seqlen, 1)
+        return reward.squeeze() # (batch, seq) 
 
     def compute_scores(self, x, y, lbd=0.11):
         # contextual matching score
@@ -93,7 +104,8 @@ class ContextMatcher(nn.Module):
         # domain fluency score
         scores_fm = self.language_model(y)
 
-        reward = (scores_cm + self.eps) * (scores_fm ** lbd)
+        #reward = scores_cm + scores_fm * lbd
+        reward = (scores_cm+self.eps) * scores_fm ** lbd
         return reward, (scores_cm, scores_fm)
 
 
@@ -104,7 +116,7 @@ def generate(seq2seq, src, max_len, vocab):
 
     return ys, log_p
 
-def rewards_compute(matcher, src, ys, log_p, adjust=True, standarize=False, gamma=0.99, eps=1e-9):
+def rewards_compute(matcher, src, ys, log_p, adjust=True, standarize=True, gamma=0.99, eps=1e-9):
     batch_size = src.shape[0]
     max_len = ys.shape[1]
     
