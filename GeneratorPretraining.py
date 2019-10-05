@@ -16,8 +16,9 @@ from dataset import *
 # In[2]:
 
 
-data_dir = "data-giga/"
+data_dir = "/tmp2/b05902064/data-giga/"
 train_path = data_dir + "train_seq.json"
+valid_path = data_dir + "valid_seq.json"
 vocab_path = data_dir + "vocab.json"
 lm_path = "trainedELMo/Model5"
 
@@ -34,8 +35,8 @@ OUTPUT_LEN = 20
 # In[4]:
 
 
-training_set = Dataset("data-giga/train_seq.json", INPUT_LEN, OUTPUT_LEN, vocab[PAD]) #train_seq
-validation_set = Dataset("data-giga/valid_seq.json", INPUT_LEN, OUTPUT_LEN, vocab[PAD])
+training_set = Dataset(valid_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD]) #train_seq
+validation_set = Dataset(valid_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD])
 
 
 # In[5]:
@@ -114,11 +115,12 @@ for e in range(start, epochs+1):
     for src, tgt in trange:
         bsize, slen = src.shape[:2]
         tgt = src.to(device)
-        src = src[:,torch.randperm(slen)]
+        src = src[:,torch.randperm(slen)].to(device)
         
         src_mask = None#(src != vocab[PAD]).unsqueeze(-2)
 
-        ys, log_p = translator(src=src, src_mask=src_mask, max_len=OUTPUT_LEN, start_symbol=vocab[BOS])
+        ys, log_p = translator.forward_teacher(
+            src=src, src_mask=src_mask, tgt, max_len=OUTPUT_LEN, start_symbol=vocab[BOS])
                 
         loss = criterion(log_p.view(-1, VOCAB_SIZE), tgt.view(-1))
         # (batch x OUTPUT_LEN)
@@ -155,38 +157,3 @@ for e in range(start, epochs+1):
         
     get_ipython().system('mkdir -p trained')
     torch.save({"model":translator.state_dict(), "loss":loss_history}, "trained/Model"+str(e))
-
-
-# In[ ]:
-
-
-# from ELMo import *
-# class ContextualMatchingLoss(nn.Module):
-#     def __init__(self, cm_model_path, fm_model_path, vocab_path, lda=0.11):
-#         """
-#         input: tensor w/ gradients, (batch, seqlen, vocab_sz)
-#             representing the logits (before softmax) of each word.
-        
-#         """
-#         super().__init__()
-#         self.lda = lda
-        
-#         self.domain_fluency = DomainFluency(fm_model_path, vocab_path)        
-        
-#         print(self.domain_fluency)
-        
-#     def forward(self, x, logits):
-#         batchsize, seqlen, vocab_size = logits.shape
-#         y_1hot = F.gumbel_softmax(logits, tau=1, hard=True)
-        
-#         cm = logp_contextual_matching(x, y_1hot)
-#         fm = logp_domain_fluency(y_1hot)
-        
-#         return -(cm+fm*self.lda)
-        
-#     def logp_contextual_matching(self, x, y_1hot):
-#         raise NotImplemented
-    
-#     def logp_domain_fluency(self, y_1hot):
-#         raise NotImplemented
-
