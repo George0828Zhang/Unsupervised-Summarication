@@ -53,9 +53,9 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 
 
 device = torch.device("cuda")
-unidir = False
-matcher = ContextMatcher(vocab, lm_path, unidir=unidir).to(device)
-matcher.eval()
+# unidir = False
+# matcher = ContextMatcher(vocab, lm_path, unidir=unidir).to(device)
+# matcher.eval()
 
 
 # In[7]:
@@ -86,10 +86,10 @@ import wandb
 wandb.init(project="contextual-matching-policy-gradient")
 wandb.config.update({
     "batch_size": batch_size,
-    "input len":INPUT_LEN,
-    "summary len":OUTPUT_LEN,
-    "unidirection":unidir,
-    "n_steps_backprop":n_steps_backprop,
+    # "input len":INPUT_LEN,
+    # "summary len":OUTPUT_LEN,
+    # "unidirection":unidir,
+    # "n_steps_backprop":n_steps_backprop,
     })
 # wandb.watch([translator, matcher])
 
@@ -102,6 +102,7 @@ def tstring(reward):
 
 # In[ ]:
 
+criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD], reduction="none").to(device)
 
 for e in range(start, epochs+1):
     translator.train()
@@ -111,28 +112,27 @@ for e in range(start, epochs+1):
     
     losses = []
     for src, tgt in trange:
-        src = src.to(device)
+        bsize, slen = src.shape[:2]
+        tgt = src.to(device)
+        src = src[:,torch.randperm(slen)]
         
-        src_mask = (src != vocab[PAD]).unsqueeze(-2)
+        src_mask = None#(src != vocab[PAD]).unsqueeze(-2)
 
         ys, log_p = translator(src=src, src_mask=src_mask, max_len=OUTPUT_LEN, start_symbol=vocab[BOS])
                 
-        reward, (cm, fm) = rewards_compute(
-            matcher=matcher,
-            src=src, ys=ys, log_p=log_p, gamma=0.99, eps=1e-9)
-                
-        loss = -reward.mean()
-            
+        loss = criterion(log_p.view(-1, VOCAB_SIZE), tgt.view(-1))
+        # (batch x OUTPUT_LEN)
+
+        first_loss = loss.view(bsize, OUTPUT_LEN)[0].mean()
+        loss = loss.mean()
+
         ### logging        
         wandb.log({
             "input":id2sent(src[0].cpu().numpy()),
             "output":id2sent(ys[0].cpu().numpy()),
             "target":id2sent(tgt[0].cpu().numpy()),
-            "reward cm":tstring(cm[0]), 
-            "reward fm":tstring(fm[0]), 
+            "loss":first_loss, 
             "batch loss":loss.item(),
-            "batch reward raw":cm.sum(-1).mean().item(),
-            "batch reward fluency":fm.sum(-1).mean().item(),
                   })
         ###########
         

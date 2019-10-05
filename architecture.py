@@ -6,6 +6,7 @@ from ELMo import LanguageModel, getELMo
 import torch.nn.functional as F
 from itertools import chain
 
+
 class Translator(nn.Module):
     """
     A standard Encoder-Decoder architecture. Base for this and many 
@@ -60,7 +61,7 @@ class ContextMatcher(nn.Module):
         for p in list(self.LM.parameters()) + list(self.pretrained_elmo.parameters()):
             p.requires_grad = False
 
-    def elmo_embed(self, t):
+    def embed(self, t):
         dummy = torch.zeros((t.shape[0], t.shape[1], 50)).type_as(t)        
         embeddings = self.pretrained_elmo(dummy, word_inputs=t)
         return embeddings['elmo_representations'][0]
@@ -74,8 +75,8 @@ class ContextMatcher(nn.Module):
         # y: (batch, len)
         seqlen = y.shape[1]
 
-        x_reps = self.elmo_embed(x) # (batch, xlen, emb)
-        y_reps = self.elmo_embed(y) # (batch, ylen, emb)
+        x_reps = self.embed(x) # (batch, xlen, emb)
+        y_reps = self.embed(y) # (batch, ylen, emb)
 
         # l2-norm on last embedding
         x_reps = F.normalize(x_reps[:,-1:,:], p=2, dim=-1) 
@@ -96,6 +97,13 @@ class ContextMatcher(nn.Module):
         # assign each reward to (Pcm(y|x))^(1/N)
         reward = (full_rw**(1/seqlen)).repeat(1, seqlen, 1)
         return reward.squeeze() # (batch, seq) 
+
+    def contextual_matching2(self, x, y):
+        # l2-norm on last embedding
+        x_reps = F.normalize(self.embed(x), p=2, dim=-1) 
+        y_reps = F.normalize(self.embed(y), p=2, dim=-1)# (batch, xylen, emb)
+
+        # need (batch, xlen, vocab) <= (batch, xlen, emb) x (batch, vocab, emb).T()
 
     def compute_scores(self, x, y, lbd=0.11):
         # contextual matching score
