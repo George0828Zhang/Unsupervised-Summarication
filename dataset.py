@@ -2,9 +2,9 @@ import torch
 from torch.utils import data
 import numpy as np
 import json
-from tqdm import tqdm_notebook as tqdm
+# from tqdm import tqdm_notebook as tqdm
 import random
-#from tqdm import tqdm
+from tqdm import tqdm
 
 class Dataset(data.Dataset):    
     def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None):
@@ -47,7 +47,6 @@ class Dataset(data.Dataset):
         to = min(fr+batch_size, self.size)
         src = self.np_jagged(self.src[fr:to])
         tgt = self.np_jagged(self.tgt[fr:to])
-        senti = self.scores[fr:to]
         return torch.from_numpy(src), torch.from_numpy(tgt)
 
     def __len__(self):
