@@ -6,6 +6,9 @@ from ELMo import LanguageModel, getELMo
 import torch.nn.functional as F
 from itertools import chain
 
+def freeze(m: nn.Module):
+    for p in list(m.parameters()):
+        p.requires_grad = False
 
 class Translator(nn.Module):
     """
@@ -50,15 +53,54 @@ class Translator(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 class ContextMatcher(nn.Module):
-    def __init__(self, vocab, elmo, LM):
+    def __init__(self, candidate_map, elmo, LM):
+        """
+        candidate_map: calculated candidate mapping, should be a tensor
+        elmo: pretrained elmo module
+        LM: finetuned elmo+linear module 
+        """
         super().__init__()        
         self.LM = LM        
         self.pretrained_elmo = elmo
+        self.candidate_map = candidate_map
 
         self.eps = 1e-9
         
-        for p in list(self.LM.parameters()) + list(self.pretrained_elmo.parameters()):
-            p.requires_grad = False
+        freeze(self.LM)
+        
+    def candidate_list(self, x):
+        """
+        batcch mode not supported
+        """
+        x = x.squeeze()
+        assert x.dim() <= 1
+                
+        pool = self.candidate_map[x,:]
+        
+        return torch.unique(pool)
+    
+    def candidate_list_batch(self, x):        
+        pool = self.candidate_map[x,:] # (batch, xlen, 50)
+        pool = pool.view(x.shape[0], -1) # (batch, xlen*50)
+        uniq = []
+        for p in pool:
+            uniq.append(torch.unique(p))
+        return uniq
+        
+    
+    def _test(self, vocab):
+        vocab_inv = {a:b for b, a in vocab.items()}
+
+        while True:
+            word = input()
+            word = word.strip().lower()
+            wid = torch.LongTensor([vocab.get(word, vocab[UNK])])
+            print("got:", vocab_inv[wid.item()], "wid:", wid)
+            c = self.candidate_list(wid)
+            print([vocab_inv[i.item()] for i in c])
+        
+       
+            
 
     def embed(self, t):
         dummy = torch.zeros((t.shape[0], t.shape[1], 50)).type_as(t)        
@@ -69,6 +111,7 @@ class ContextMatcher(nn.Module):
 #         return torch.log(self.LM.inference(t)+self.eps)
         return self.LM.inference(t)
 
+    
 
     def contextual_matching(self, x, y):
         # y: (batch, len)
@@ -120,12 +163,6 @@ class ContextMatcher(nn.Module):
         return reward, (scores_cm, scores_fm)
 
 
-def generate(seq2seq, src, max_len, vocab):
-    src_mask = (src != vocab[PAD]).unsqueeze(-2)
-
-    ys, log_p = seq2seq(src, src_mask, max_len, vocab[BOS])
-
-    return ys, log_p
 
 def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, gamma=0.99, eps=1e-9):
     batch_size = src.shape[0]
