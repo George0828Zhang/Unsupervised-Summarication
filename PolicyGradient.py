@@ -76,7 +76,9 @@ optimizer = torch.optim.RMSprop(translator.parameters(), lr=1e-4)
 start = 1
 epochs = 10
 n_steps_backprop = 1
-
+adjust_r = True
+zero_mean_r = True
+unit_standard_r = False
 
 # In[ ]:
 
@@ -90,6 +92,9 @@ wandb.config.update({
     "summary len":OUTPUT_LEN,
     "unidirection":unidir,
     "n_steps_backprop":n_steps_backprop,
+    "adjust":adjust_r,
+    "zero mean":zero_mean_r,
+    "unit standard":unit_standard_r
     })
 # wandb.watch([translator, matcher])
 
@@ -119,7 +124,8 @@ for e in range(start, epochs+1):
                 
         reward, (cm, fm) = rewards_compute(
             matcher=matcher,
-            src=src, ys=ys, log_p=log_p, gamma=0.99, eps=1e-9)
+            src=src, ys=ys, log_p=log_p, adjust=adjust_r, 
+            zero_mean=zero_mean_r, unit_standard=unit_standard_r, gamma=0.99, eps=1e-9)
                 
         loss = -reward.mean()
             
