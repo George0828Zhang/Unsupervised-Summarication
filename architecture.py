@@ -50,12 +50,11 @@ class Translator(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 class ContextMatcher(nn.Module):
-    def __init__(self, vocab, lmpath, unidir):
-        super().__init__()
-        self.LM = LanguageModel(vocab, unidir)
-        tmp = torch.load(lmpath, map_location=lambda storage, loc: storage)['model']
-        self.LM.load_state_dict(tmp)
-        self.pretrained_elmo = getELMo(vocab, unidir)
+    def __init__(self, vocab, elmo, LM):
+        super().__init__()        
+        self.LM = LM        
+        self.pretrained_elmo = elmo
+
         self.eps = 1e-9
         
         for p in list(self.LM.parameters()) + list(self.pretrained_elmo.parameters()):
@@ -94,8 +93,12 @@ class ContextMatcher(nn.Module):
         # this corresponds to (Pcm(y|x))
         full_rw = F.sigmoid(cosine) # (batch, 1, 1) 
         
-        # assign each reward to (Pcm(y|x))^(1/N)
-        reward = (full_rw**(1/seqlen)).repeat(1, seqlen, 1)
+        # # assign each reward to (Pcm(y|x))^(1/N)
+        # reward = (full_rw**(1/seqlen)).repeat(1, seqlen, 1)
+
+        # assign each reward to (Pcm(y|x))/N
+        reward = (full_rw/seqlen).repeat(1, seqlen, 1)
+
         return reward.squeeze() # (batch, seq) 
 
     def contextual_matching2(self, x, y):
@@ -124,7 +127,7 @@ def generate(seq2seq, src, max_len, vocab):
 
     return ys, log_p
 
-def rewards_compute(matcher, src, ys, log_p, adjust=True, standarize=True, gamma=0.99, eps=1e-9):
+def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, gamma=0.99, eps=1e-9):
     batch_size = src.shape[0]
     max_len = ys.shape[1]
     
@@ -145,10 +148,13 @@ def rewards_compute(matcher, src, ys, log_p, adjust=True, standarize=True, gamma
         rewardTensor = rewards
 
     # should we standarize the rewards?
-    if standarize:
-        r_mean = rewardTensor.mean(-1, keepdim=True)
-        r_std = rewardTensor.std(-1, keepdim=True)
-        rewardTensor = (rewardTensor - r_mean)/(r_std+eps)
+    
+    r_mean = rewardTensor.mean(-1, keepdim=True)
+    r_std = rewardTensor.std(-1, keepdim=True)
+    if zero_mean:
+        rewardTensor = rewardTensor - r_mean
+    if unit_standard:
+        rewardTensor = rewardTensor/(r_std+eps)
 
 
     final_reward = torch.sum(torch.mul(log_p, rewardTensor), -1)
@@ -234,7 +240,7 @@ class PointerGenerator(nn.Module):
         
         log_probs_seq = []
         
-        for i in range(self.output_len):
+        for i in range(max_len):
             # 3 dimensional
             ans_emb = self.emb_layer(ys[:,-1].unsqueeze(1)) #(batch, 1, emb)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c)) #(batch, 1, 2hidden)
@@ -300,7 +306,7 @@ class PointerGenerator(nn.Module):
         
         logits = []
         tgtlen = tgt.shape[1]
-        for i in range(self.output_len):
+        for i in range(max_len):
             # 3 dimensional
             cand = ys[:,-1:]#tgt[:,i:i+1] if i<tgtlen else ys[:,-1:]
             
