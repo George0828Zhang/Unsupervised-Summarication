@@ -4,7 +4,7 @@ from preprocessors import BOS, EOS, PAD, UNK
 
 from ELMo import LanguageModel, getELMo
 import torch.nn.functional as F
-from itertools import chain
+from tqdm.auto import tqdm, trange
 
 def freeze(m: nn.Module):
     for p in list(m.parameters()):
@@ -53,54 +53,98 @@ class Translator(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 class ContextMatcher(nn.Module):
-    def __init__(self, candidate_map, elmo, LM):
+    def __init__(self, embeddings, elmo, LM):
         """
-        candidate_map: calculated candidate mapping, should be a tensor
+        embeddings: pretrained embeddings, should have shape (vocab, emb_dim)
         elmo: pretrained elmo module
         LM: finetuned elmo+linear module 
         """
         super().__init__()        
         self.LM = LM        
         self.pretrained_elmo = elmo
-        self.candidate_map = candidate_map
-
+        self.embeddings = embeddings
+        
         self.eps = 1e-9
-        
+
+        if not isinstance(self.embeddings, torch.Tensor):
+            self.embeddings = torch.Tensor(self.embeddings)
+
+        # l2-norm
+        self.embeddings = F.normalize(self.embeddings, p=2, dim=-1)
+
         freeze(self.LM)
+
+        self.candidate_map = self._get_candidate_mapping()
         
-    def candidate_list(self, x):
-        """
-        batcch mode not supported
-        """
-        x = x.squeeze()
-        assert x.dim() <= 1
+    def _get_candidate_mapping(self, batch_size = 128):
+        vocab_size, emb_dim = self.embeddings.shape
                 
-        pool = self.candidate_map[x,:]
+        total = int(math.ceil(vocab_size/batch_size))
         
-        return torch.unique(pool)
+        output = []
+        for i in trange(total, desc="candidate-mappings"):
+            # (50000, 1024)
+            fr = i*batch_size
+            to = min(fr+batch_size, vocab_size)
+            cur = self.embeddings[fr:to] #(batch, 1024)
+            scores = torch.matmul(cur, self.embeddings.transpose(0, 1)) #(batch, 50000)
+            candidates = torch.argsort(scores, dim=-1, descending=True) #(batch, 50000)
+            output.append(candidates[:,:50].cpu()) #(batch, 50)            
+        return torch.cat(output, dim=0)
+        
     
-    def candidate_list_batch(self, x):        
-        pool = self.candidate_map[x,:] # (batch, xlen, 50)
-        pool = pool.view(x.shape[0], -1) # (batch, xlen*50)
+    def candidate_list(self, x, K):  
+        assert K <= 50
+        assert x.dim() == 2      
+        pool = self.candidate_map[x,:K] # (batch, xlen, K)
+        pool = pool.view(x.shape[0], -1) # (batch, xlen*K)
         uniq = []
         for p in pool:
             uniq.append(torch.unique(p))
         return uniq
-        
-    
-    def _test(self, vocab):
-        vocab_inv = {a:b for b, a in vocab.items()}
-
-        while True:
-            word = input()
-            word = word.strip().lower()
-            wid = torch.LongTensor([vocab.get(word, vocab[UNK])])
-            print("got:", vocab_inv[wid.item()], "wid:", wid)
-            c = self.candidate_list(wid)
-            print([vocab_inv[i.item()] for i in c])
-        
        
-            
+    def voronoi_split(self, candidates):
+        assert candidates.dim() == 1
+        if not isinstance(candidates, torch.Tensor):
+            candidates = torch.Tensor(candidates)#.type_as(self.embeddings)
+        cand_emb = self.embeddings[candidates,:] #(C, emb)
+        scores = torch.matmul(self.embeddings, cand_emb.transpose(0,1)) #(V, C)
+        cell_num = torch.argmax(scores, dim=1).squeeze() #(V,)
+        self.voronoi_mapping = cell_num
+
+    def get_cell_mates(self, wid):
+        if not hasattr(self, "voronoi_mapping"):
+            print("execute voronoi_split(candidates) first.")
+            return 
+        cell = self.voronoi_mapping[wid]
+        return (self.voronoi_mapping == cell).nonzero()
+
+    def _runtest(self, vocab, sent, qword):
+        vocab_inv = {a:b for b,a in vocab.items()}
+        words = sent.lower().split()
+        
+        wids = [vocab.get(word, vocab[UNK]) for word in words]
+        
+        print("got:", [vocab_inv[w] for w in wids], "wids:", wids)
+        
+        wids = torch.LongTensor(wids)
+        
+        out = self.candidate_list(wids.unsqueeze(0), K=6) # batch = 1
+        candi = out[0]
+        print("candidates:", [vocab_inv[i.item()] for i in candi])
+               
+        ### voronoi
+        self.voronoi_split(candi)
+        
+        ### testing
+        word = qword.lower().strip()
+        
+        wid = vocab.get(word, vocab[UNK])
+        
+        print("got:", vocab_inv[wid], "wids:", wid)
+        
+        mates = self.get_cell_mates(wid)
+        print("cell mates:", [vocab_inv[i.item()] for i in mates])
 
     def embed(self, t):
         dummy = torch.zeros((t.shape[0], t.shape[1], 50)).type_as(t)        

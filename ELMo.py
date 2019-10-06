@@ -9,13 +9,10 @@ import random
 from allennlp.data.token_indexers.elmo_indexer import ELMoCharacterMapper
 from preprocessors import BOS, EOS, PAD, UNK # special tokens
 import math
-from tqdm import tqdm_notebook as tqdm
+from tqdm.auto import tqdm
 
 
-
-
-
-def getELMo(vocab, unidir, downstream=False):
+def getELMo(vocab, unidir, downstream=False, mix_parameters=[1,1,1]):
     options_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
     weight_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
     
@@ -23,7 +20,7 @@ def getELMo(vocab, unidir, downstream=False):
     if downstream:
         elmo = Elmo(options_file, weight_file, num_output_representations=1, vocab_to_cache=vocab_to_cache)
     else:
-        elmo = Elmo(options_file, weight_file, num_output_representations=1, scalar_mix_parameters=[1,1,1], vocab_to_cache=vocab_to_cache)
+        elmo = Elmo(options_file, weight_file, num_output_representations=1, scalar_mix_parameters=mix_parameters, vocab_to_cache=vocab_to_cache)
         
 
     if unidir:
