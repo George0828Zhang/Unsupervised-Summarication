@@ -54,6 +54,7 @@ class ContextMatcher(nn.Module):
         super().__init__()        
         self.LM = LM        
         self.pretrained_elmo = elmo
+
         self.eps = 1e-9
         
         for p in list(self.LM.parameters()) + list(self.pretrained_elmo.parameters()):

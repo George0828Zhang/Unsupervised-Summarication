@@ -14,6 +14,7 @@ from tqdm import tqdm_notebook as tqdm
 
 
 
+
 def getELMo(vocab, unidir, downstream=False):
     options_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
     weight_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
