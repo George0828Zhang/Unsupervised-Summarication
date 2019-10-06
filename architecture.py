@@ -50,12 +50,10 @@ class Translator(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 class ContextMatcher(nn.Module):
-    def __init__(self, vocab, lmpath, unidir):
-        super().__init__()
-        self.LM = LanguageModel(vocab, unidir)
-        tmp = torch.load(lmpath)['model']
-        self.LM.load_state_dict(tmp)
-        self.pretrained_elmo = getELMo(vocab, unidir)
+    def __init__(self, vocab, elmo, LM):
+        super().__init__()        
+        self.LM = LM        
+        self.pretrained_elmo = elmo
         self.eps = 1e-9
         
         for p in list(self.LM.parameters()) + list(self.pretrained_elmo.parameters()):

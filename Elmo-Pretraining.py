@@ -26,12 +26,12 @@ batch_size_inf = 64
 # In[3]:
 
 
-import wandb
+# import wandb
 
-wandb.init(entity="george0828zhang", project="elmo-finetune")
-wandb.config.update({
-    "batch_size": batch_size,
-    })
+# wandb.init(entity="george0828zhang", project="elmo-finetune")
+# wandb.config.update({
+#     "batch_size": batch_size,
+#     })
 
 
 # In[4]:
@@ -66,7 +66,7 @@ torch.save(model, "preload_LM")
 # In[7]:
 
 
-wandb.watch([model])
+# wandb.watch([model])
 
 
 # In[8]:
@@ -140,19 +140,19 @@ for e in range(start, epochs+1):
         _, ys = torch.max(logits, dim=-1)
         
         ### logging        
-        wandb.log({
-            "input":id2sent(src[0].cpu().numpy()),
-            "output":id2sent(ys[0].cpu().numpy()),
-            "target":id2sent(tgt[0].cpu().numpy()),
-            "batch loss":loss.item(),
-                  })
+#         wandb.log({
+#             "input":id2sent(src[0].cpu().numpy()),
+#             "output":id2sent(ys[0].cpu().numpy()),
+#             "target":id2sent(tgt[0].cpu().numpy()),
+#             "batch loss":loss.item(),
+#                   })
         ###########
         
     print("Epoch train loss:", np.mean(loss_history))
     print("Epoch valid loss:", validation())
         
-    get_ipython().system('mkdir -p trained')
-    torch.save({"model":model.state_dict(), "loss":loss_history}, "trained/Model"+str(e))
+    get_ipython().system('mkdir -p trainedELMo')
+    torch.save({"model":model.state_dict(), "loss":loss_history}, "trainedELMo/Model"+str(e))
 
 
 # In[ ]:

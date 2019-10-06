@@ -38,11 +38,11 @@ def getELMo(vocab, unidir, downstream=False):
     return elmo 
 
 class LanguageModel(nn.Module):
-    def __init__(self, vocab, unidir):
+    def __init__(self, vocab, elmo):
         super().__init__()        
         self.vocab = vocab
         self.vocab_size = len(vocab)
-        self.elmo = getELMo(vocab, unidir, downstream=True)
+        self.elmo = elmo
         self.project = nn.Linear(1024, self.vocab_size)
         self.CE = nn.CrossEntropyLoss(ignore_index=self.vocab[PAD], reduction='none')
     
