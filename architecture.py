@@ -241,7 +241,7 @@ class PointerGenerator(nn.Module):
         
         log_probs_seq = []
         
-        for i in range(self.output_len):
+        for i in range(max_len):
             # 3 dimensional
             ans_emb = self.emb_layer(ys[:,-1].unsqueeze(1)) #(batch, 1, emb)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c)) #(batch, 1, 2hidden)
@@ -307,7 +307,7 @@ class PointerGenerator(nn.Module):
         
         logits = []
         tgtlen = tgt.shape[1]
-        for i in range(self.output_len):
+        for i in range(max_len):
             # 3 dimensional
             cand = ys[:,-1:]#tgt[:,i:i+1] if i<tgtlen else ys[:,-1:]
             
