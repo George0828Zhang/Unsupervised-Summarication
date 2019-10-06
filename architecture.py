@@ -89,24 +89,18 @@ class ContextMatcher(nn.Module):
             cur = self.embeddings[fr:to] #(batch, 1024)
             scores = torch.matmul(cur, self.embeddings.transpose(0, 1)) #(batch, 50000)
             candidates = torch.argsort(scores, dim=-1, descending=True) #(batch, 50000)
-            output.append(candidates[:,:50].cpu()) #(batch, 50)            
+            output.append(candidates[:,:50].cpu()) #(batch, 50) # send to cpu to free memory
         return torch.cat(output, dim=0)
         
     
     def candidate_list(self, x, K):  
         assert K <= 50
-        assert x.dim() == 2      
-        pool = self.candidate_map[x,:K] # (batch, xlen, K)
-        pool = pool.view(x.shape[0], -1) # (batch, xlen*K)
-        uniq = []
-        for p in pool:
-            uniq.append(torch.unique(p))
-        return uniq
+        assert x.dim() <= 1
+        pool = self.candidate_map[x,:K] # (xlen, K)
+        return torch.unique(pool)
        
     def voronoi_split(self, candidates):
         assert candidates.dim() == 1
-        if not isinstance(candidates, torch.Tensor):
-            candidates = torch.Tensor(candidates)#.type_as(self.embeddings)
         cand_emb = self.embeddings[candidates,:] #(C, emb)
         scores = torch.matmul(self.embeddings, cand_emb.transpose(0,1)) #(V, C)
         cell_num = torch.argmax(scores, dim=1).squeeze() #(V,)
@@ -129,8 +123,8 @@ class ContextMatcher(nn.Module):
         
         wids = torch.LongTensor(wids)
         
-        out = self.candidate_list(wids.unsqueeze(0), K=6) # batch = 1
-        candi = out[0]
+        out = self.candidate_list(wids, K=6)
+        candi = out
         print("candidates:", [vocab_inv[i.item()] for i in candi])
                
         ### voronoi
