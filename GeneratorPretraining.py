@@ -16,7 +16,7 @@ from dataset import *
 # In[2]:
 
 
-data_dir = "/tmp2/b05902064/data-giga/"
+data_dir = "data-giga/"
 train_path = data_dir + "train_seq.json"
 valid_path = data_dir + "valid_seq.json"
 vocab_path = data_dir + "vocab.json"
@@ -42,8 +42,8 @@ validation_set = Dataset(valid_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD])
 # In[5]:
 
 
-batch_size = 32
-batch_size_inf = 32
+batch_size = 50
+batch_size_inf = 50
 training_generator = Loader(training_set, batch_size=batch_size, shuffle=False)
 validation_generator = Loader(validation_set, batch_size=batch_size_inf, shuffle=False)
 total_train = int(math.ceil(training_set.size / batch_size))
@@ -112,7 +112,7 @@ for e in range(start, epochs+1):
     trange = tqdm(training_generator, total=total_train)
     
     losses = []
-    for src, tgt in trange:
+    for i, (src, tgt) in enumerate(trange):
         bsize, slen = src.shape[:2]
         tgt = src.clone()
         src = src[:,torch.randperm(slen)]
@@ -123,7 +123,7 @@ for e in range(start, epochs+1):
         src_mask = None#(src != vocab[PAD]).unsqueeze(-2)
 
         ys, log_p = translator.forward_teacher(
-            src=src, src_mask=src_mask, tgt=tgt, max_len=OUTPUT_LEN, start_symbol=vocab[BOS])
+            src=src, src_mask=src_mask, tgt=tgt, max_len=slen, start_symbol=vocab[BOS])
                 
         loss = criterion(log_p.view(-1, VOCAB_SIZE), tgt.view(-1))
         # (batch x OUTPUT_LEN)
@@ -150,9 +150,11 @@ for e in range(start, epochs+1):
     
         loss_history.append(loss.item())
         trange.set_postfix(**{'loss':'{:.5f}'.format(loss.item())})
+
+        if i % 5000 == 4999:
+            torch.save(translator.state_dict(), "trained/Pretrain"+str(i))
         
         
     print("Epoch train loss:", np.mean(loss_history))
         
-    get_ipython().system('mkdir -p pretrained')
-    torch.save({"model":translator.state_dict(), "loss":loss_history}, "pretrained/Model"+str(e))
+    torch.save(translator.state_dict(), "trained/Pretrain-e"+str(e))
