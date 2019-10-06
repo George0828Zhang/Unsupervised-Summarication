@@ -59,7 +59,7 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 
 
 device = torch.device("cuda")
-model = torch.load(preload).to(device) #LanguageModel(vocab, unidir=True).to(device)
+model = LanguageModel(vocab, emb_dim=1024, hidden_dim=1024, dropout=0.5).to(device)
 criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD]).to(device)
 optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-4)
 

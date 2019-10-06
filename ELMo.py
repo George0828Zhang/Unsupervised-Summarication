@@ -39,20 +39,22 @@ def getELMo(vocab, unidir, downstream=False):
     return elmo 
 
 class LanguageModel(nn.Module):
-    def __init__(self, vocab, elmo):
+    def __init__(self, vocab, emb_dim, hidden_dim, dropout):
         super().__init__()        
         self.vocab = vocab
         self.vocab_size = len(vocab)
-        self.elmo = elmo
-        self.project = nn.Linear(1024, self.vocab_size)
+                
+        self.embed = nn.Embedding(self.vocab_size, emb_dim)
+        self.lstm = nn.LSTM(emb_dim, hidden_dim, num_layers=2, dropout=dropout, batch_first=True, bidirectional=False)
+        self.project = nn.Linear(hidden_dim, self.vocab_size)            
+        
+        
         self.CE = nn.CrossEntropyLoss(ignore_index=self.vocab[PAD], reduction='none')
     
     def forward(self, word_ids):
-        dummy = torch.zeros((word_ids.shape[0], word_ids.shape[1], 50)).type_as(word_ids)
-        embeddings = self.elmo(dummy, word_inputs=word_ids)
-        distribution = self.project(embeddings['elmo_representations'][0])
-        return distribution
-              
+        emb = self.embed(word_ids)
+        out, (h, c) = self.lstm(emb)
+        return self.project(out)              
 
     def inference(self, sent):
         # (batch, len)
