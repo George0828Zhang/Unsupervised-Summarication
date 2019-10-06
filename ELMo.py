@@ -14,10 +14,16 @@ from tqdm import tqdm_notebook as tqdm
 
 
 
-def getELMo(vocab, unidir):
-    options_file = "data/elmo_2x4096_512_2048cnn_2xhighway_options.json"
-    weight_file = "data/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
-    elmo = Elmo(options_file, weight_file, num_output_representations=1, dropout=0.5, vocab_to_cache=list(vocab.keys()))
+def getELMo(vocab, unidir, downstream=False):
+    options_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+    weight_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
+    
+    vocab_to_cache=sorted(vocab.keys(), key=lambda t: vocab[t])
+    if downstream:
+        elmo = Elmo(options_file, weight_file, num_output_representations=1, vocab_to_cache=vocab_to_cache)
+    else:
+        elmo = Elmo(options_file, weight_file, num_output_representations=1, scalar_mix_parameters=[1,1,1], vocab_to_cache=vocab_to_cache)
+        
 
     if unidir:
         for l in ["backward_layer_0", "backward_layer_1"]:
@@ -29,15 +35,14 @@ def getELMo(vocab, unidir):
                         target = getattr(subject, a)
                         target.data.fill_(0.0)
 
-    return elmo
+    return elmo 
 
 class LanguageModel(nn.Module):
     def __init__(self, vocab, unidir):
-        super().__init__()
-        
+        super().__init__()        
         self.vocab = vocab
         self.vocab_size = len(vocab)
-        self.elmo = getELMo(vocab, unidir)
+        self.elmo = getELMo(vocab, unidir, downstream=True)
         self.project = nn.Linear(1024, self.vocab_size)
         self.CE = nn.CrossEntropyLoss(ignore_index=self.vocab[PAD], reduction='none')
     

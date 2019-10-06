@@ -72,7 +72,7 @@ class PretrainDataset(data.Dataset):
         self.pad_idx = pad_idx
         
         for i in tqdm(range(self.size)):
-            summ = sum_list[i][:OUTPUT_MAX+1]
+            summ = data_list[i][:OUTPUT_MAX+1]
             src = summ[:-1]
             # tgt = sum_list[i][:OUTPUT_MAX]
             tgt = summ[1:]
