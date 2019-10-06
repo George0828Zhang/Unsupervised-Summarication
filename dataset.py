@@ -2,9 +2,8 @@ import torch
 from torch.utils import data
 import numpy as np
 import json
-# from tqdm import tqdm_notebook as tqdm
 import random
-from tqdm import tqdm
+from tqdm.auto import tqdm, trange
 
 class Dataset(data.Dataset):    
     def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None):
@@ -25,7 +24,7 @@ class Dataset(data.Dataset):
         
         self.pad_idx = pad_idx
         
-        for i in tqdm(range(self.size)):
+        for i in trange(self.size):#tqdm(range(self.size)):
             src = data_list[i][:INPUT_MAX]
             tgt = sum_list[i][:OUTPUT_MAX]
             self.src.append(src)
@@ -71,7 +70,7 @@ class PretrainDataset(data.Dataset):
         
         self.pad_idx = pad_idx
         
-        for i in tqdm(range(self.size)):
+        for i in trange(self.size):#tqdm(range(self.size)):
             summ = data_list[i][:OUTPUT_MAX+1]
             src = summ[:-1]
             # tgt = sum_list[i][:OUTPUT_MAX]

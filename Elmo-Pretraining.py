@@ -3,7 +3,7 @@
 
 # In[1]:
 
-
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ import json
 import random
 from preprocessors import BOS, EOS, PAD, UNK
 import math
-from tqdm import tqdm_notebook as tqdm
+from tqdm.auto import tqdm, trange
 from ELMo import LanguageModel
 from dataset import *
 
@@ -26,18 +26,20 @@ batch_size_inf = 64
 # In[3]:
 
 
-# import wandb
+import wandb
 
-# wandb.init(entity="george0828zhang", project="elmo-finetune")
-# wandb.config.update({
-#     "batch_size": batch_size,
-#     })
+wandb.init(entity="george0828zhang", project="contextual-matching-policy-gradient")
+wandb.config.update({
+    "batch_size": batch_size,
+    })
 
 
 # In[4]:
 
 
-data_dir = "/tmp2/b05902064/data-giga/"
+data_dir = "../data-giga/"
+preload = "../preload_LM"
+outdir = "traindELMo/"
 vocab = json.load(open(data_dir+"vocab.json", "r"))
 vocab_size = len(vocab)
 training_set = PretrainDataset(data_dir+"train_seq.json", 50, 50, vocab[PAD]) #train_seq
@@ -57,16 +59,15 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 
 
 device = torch.device("cuda")
-model = LanguageModel(vocab, unidir=True).to(device)
+model = torch.load(preload).to(device) #LanguageModel(vocab, unidir=True).to(device)
 criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD]).to(device)
 optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-4)
 
-torch.save(model, "preload_LM")
 
 # In[7]:
 
 
-# wandb.watch([model])
+wandb.watch([model])
 
 
 # In[8]:
@@ -110,9 +111,9 @@ epochs = 10
 # In[11]:
 
 
-if start != 1:
-    smodel = torch.load("trainedELMo/Model"+str(start-1))
-    model.load_state_dict(smodel['model'])
+# if start != 1:
+#     smodel = torch.load("trainedELMo/Model"+str(start-1))
+#     model.load_state_dict(smodel['model'])
 
 
 # In[12]:
@@ -120,9 +121,8 @@ if start != 1:
 
 for e in range(start, epochs+1):
     model.train()
-    print("[epoch]", e)
     loss_history = []
-    trange = tqdm(training_generator, total=total_train)
+    trange = tqdm(training_generator, total=total_train, desc="epoch {}".format(e))
     
     for src, tgt in trange:
         src = src.to(device)
@@ -140,52 +140,17 @@ for e in range(start, epochs+1):
         _, ys = torch.max(logits, dim=-1)
         
         ### logging        
-#         wandb.log({
-#             "input":id2sent(src[0].cpu().numpy()),
-#             "output":id2sent(ys[0].cpu().numpy()),
-#             "target":id2sent(tgt[0].cpu().numpy()),
-#             "batch loss":loss.item(),
-#                   })
+        wandb.log({
+            "input":id2sent(src[0].cpu().numpy()),
+            "output":id2sent(ys[0].cpu().numpy()),
+            "target":id2sent(tgt[0].cpu().numpy()),
+            "batch loss":loss.item(),
+                  })
         ###########
         
     print("Epoch train loss:", np.mean(loss_history))
     print("Epoch valid loss:", validation())
         
-    get_ipython().system('mkdir -p trainedELMo')
-    torch.save({"model":model.state_dict(), "loss":loss_history}, "trainedELMo/Model"+str(e))
-
-
-# In[ ]:
-
-
-print("Epoch valid loss:", validation())
-
-
-# In[ ]:
-
-
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-
-losses = []
-for i in range(5):
-    s = torch.load("trainedELMo/Model"+str(i+1))
-    mean = np.mean(s['loss'])
-    print(mean)
-    losses.append(mean)
-    
-
-
-# In[ ]:
-
-
-plt.plot(losses)
-plt.show()
-
-
-# In[ ]:
-
-
-
-
+    #get_ipython().system('mkdir -p trainedELMo')
+    os.makedirs(outdir,exist_ok=True)
+    torch.save(model, outdir+"Model"+str(e))
