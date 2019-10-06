@@ -15,8 +15,8 @@ from tqdm import tqdm_notebook as tqdm
 
 
 def getELMo(vocab, unidir):
-    options_file = "data/elmo_2x4096_512_2048cnn_2xhighway_options.json"
-    weight_file = "data/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
+    options_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+    weight_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
     elmo = Elmo(options_file, weight_file, num_output_representations=1, dropout=0.5, vocab_to_cache=list(vocab.keys()))
 
     if unidir:
