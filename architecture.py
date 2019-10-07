@@ -53,7 +53,7 @@ class Translator(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 class ContextMatcher(nn.Module):
-    def __init__(self, embeddings, elmo, LM):
+    def __init__(self, embeddings, elmo, LM, candidate_map=None):
         """
         embeddings: pretrained embeddings, should have shape (vocab, emb_dim)
         elmo: pretrained elmo module
@@ -74,7 +74,10 @@ class ContextMatcher(nn.Module):
 
         freeze(self.LM)
 
-        self.candidate_map = self._get_candidate_mapping()
+        if candidate_map is None:
+            self.candidate_map = self._get_candidate_mapping()
+        else:
+            self.candidate_map = candidate_map
         
     def _get_candidate_mapping(self, batch_size = 128):
         vocab_size, emb_dim = self.embeddings.shape
@@ -159,11 +162,16 @@ class ContextMatcher(nn.Module):
         y_reps = self.embed(y) # (batch, ylen, emb)
 
         # l2-norm on last embedding
-        x_reps = F.normalize(x_reps[:,-1:,:], p=2, dim=-1) 
-        y_reps = F.normalize(y_reps[:,-1:,:], p=2, dim=-1) # (batch, 1, emb)
+        x_reps = F.normalize(x_reps, p=2, dim=-1) # (batch, xlen, emb)
+        y_reps = F.normalize(y_reps, p=2, dim=-1) # (batch, ylen, emb)
 
-        cosine = torch.matmul(y_reps, x_reps.transpose(-2, -1)) # (batch, 1, 1) 
+        # should try max and mean
+        x_sent = x_reps.mean(1, keepdim=True) # (batch, 1, emb)
 
+        cosine = torch.matmul(y_reps, x_sent.transpose(-2, -1)) # (batch, ylen, 1)
+        #scores, _ = torch.max(cosine, dim=2) # (batch, ylen)
+        # likelihood = torch.sigmoid(cosine.squeeze())
+        return cosine.squeeze()
 #         # this corresponds to log(Pcm(y|x))
 #         full_rw = F.logsigmoid(cosine) # (batch, 1, 1) 
         
@@ -172,22 +180,15 @@ class ContextMatcher(nn.Module):
 #         return reward.squeeze() # (batch, seq) 
 
         # this corresponds to (Pcm(y|x))
-        full_rw = F.sigmoid(cosine) # (batch, 1, 1) 
+        #full_rw = torch.sigmoid(cosine) # (batch, 1, 1) 
         
         # # assign each reward to (Pcm(y|x))^(1/N)
         # reward = (full_rw**(1/seqlen)).repeat(1, seqlen, 1)
 
         # assign each reward to (Pcm(y|x))/N
-        reward = (full_rw/seqlen).repeat(1, seqlen, 1)
+        #reward = (full_rw/seqlen).repeat(1, seqlen, 1)
 
-        return reward.squeeze() # (batch, seq) 
-
-    def contextual_matching2(self, x, y):
-        # l2-norm on last embedding
-        x_reps = F.normalize(self.embed(x), p=2, dim=-1) 
-        y_reps = F.normalize(self.embed(y), p=2, dim=-1)# (batch, xylen, emb)
-
-        # need (batch, xlen, vocab) <= (batch, xlen, emb) x (batch, vocab, emb).T()
+        #return reward.squeeze() # (batch, seq) 
 
     def compute_scores(self, x, y, lbd=0.11):
         # contextual matching score
@@ -197,7 +198,7 @@ class ContextMatcher(nn.Module):
         scores_fm = self.language_model(y)
 
         #reward = scores_cm + scores_fm * lbd
-        reward = (scores_cm+self.eps) * scores_fm ** lbd
+        reward = scores_cm + scores_fm * lbd
         return reward, (scores_cm, scores_fm)
 
 
@@ -206,7 +207,7 @@ def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, g
     batch_size = src.shape[0]
     max_len = ys.shape[1]
     
-    rewards, (cm, fm) = matcher.compute_scores(src, ys, lbd=0.011) # should have same shape as ys
+    rewards, (cm, fm) = matcher.compute_scores(src, ys, lbd=0.11) # should have same shape as ys
     
     # should we adjust the rewards?
     if adjust:
@@ -224,8 +225,8 @@ def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, g
 
     # should we standarize the rewards?
     
-    r_mean = rewardTensor.mean(-1, keepdim=True)
-    r_std = rewardTensor.std(-1, keepdim=True)
+    r_mean = rewardTensor.mean()#-1, keepdim=True)
+    r_std = rewardTensor.std()#-1, keepdim=True)
     if zero_mean:
         rewardTensor = rewardTensor - r_mean
     if unit_standard:
