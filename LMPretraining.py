@@ -21,7 +21,7 @@ from transformer_nb2 import LabelSmoothing
 # In[2]:
 
 
-batch_size = 64
+batch_size = 72 
 batch_size_inf = 64
 
 
@@ -39,7 +39,7 @@ wandb.config.update({
 # In[4]:
 
 
-data_dir = "data-giga/"
+data_dir = "../data-giga/"
 outdir = "trainedELMo/"
 vocab = json.load(open(data_dir+"vocab.json", "r"))
 vocab_size = len(vocab)
@@ -60,16 +60,20 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 
 
 device = torch.device("cuda")
-model = LanguageModel(vocab, emb_dim=1024, hidden_dim=1024, dropout=0.5).to(device)
+model = LanguageModel(vocab, emb_dim=1024, hidden_dim=1024, dropout=0.5, emb_share=True).to(device)
 #criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD]).to(device)
-criterion = LabelSmoothing(size=vocab_size, padding_idx=vocab[PAD], smoothing=0.1).to(device)
+crit = LabelSmoothing(size=vocab_size, padding_idx=vocab[PAD], smoothing=0.1).to(device)
+def criterion(x,y):
+    x = F.log_softmax(x, -1)
+    n_token = (y != vocab[PAD]).data.sum().item()
+    return crit(x, y)/n_token
 # optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3)
 optimizer = AdaBound(model.parameters(), lr=1e-3, final_lr=0.1)
 
 # In[7]:
 
 
-wandb.watch([model])
+#wandb.watch([model])
 
 
 # In[8]:
