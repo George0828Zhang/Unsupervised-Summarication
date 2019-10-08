@@ -53,7 +53,8 @@ class ContextMatcher(nn.Module):
     def __init__(self, vocab, lmpath, unidir):
         super().__init__()
         self.LM = LanguageModel(vocab, unidir)
-        tmp = torch.load(lmpath, map_location=lambda storage, loc: storage)['model']
+        tmp = torch.load(lmpath)['model']
+#         tmp = torch.load(lmpath, map_location=lambda storage, loc: storage)['model']
         self.LM.load_state_dict(tmp)
         self.pretrained_elmo = getELMo(vocab, unidir)
         self.eps = 1e-9
