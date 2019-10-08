@@ -36,22 +36,24 @@ def getELMo(vocab, unidir, downstream=False, mix_parameters=[1,1,1]):
     return elmo 
 
 class LanguageModel(nn.Module):
-    def __init__(self, vocab, emb_dim, hidden_dim, dropout):
+    def __init__(self, vocab, emb_dim, hidden_dim, dropout, emb_share=True):
         super().__init__()        
         self.vocab = vocab
         self.vocab_size = len(vocab)
                 
         self.embed = nn.Embedding(self.vocab_size, emb_dim)
         self.lstm = nn.LSTM(emb_dim, hidden_dim, num_layers=2, dropout=dropout, batch_first=True, bidirectional=False)
-        self.project = nn.Linear(hidden_dim, self.vocab_size)            
-        
-        
+        self.emb_share = emb_share
+        if not emb_share:
+            self.project = nn.Linear(hidden_dim, self.vocab_size) 
+
         self.CE = nn.CrossEntropyLoss(ignore_index=self.vocab[PAD], reduction='none')
     
     def forward(self, word_ids):
         emb = self.embed(word_ids)
         out, (h, c) = self.lstm(emb)
-        return self.project(out)              
+        proj = F.linear(out, self.embed.weight) if self.emb_share else self.project(out)
+        return proj
 
     def inference(self, sent):
         # (batch, len)

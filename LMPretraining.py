@@ -9,12 +9,14 @@ import torch
 import torch.nn as nn
 import json
 import random
-from preprocessors import BOS, EOS, PAD, UNK
 import math
 from tqdm.auto import tqdm, trange
+from adabound import AdaBound
+
+from preprocessors import BOS, EOS, PAD, UNK
 from ELMo import LanguageModel
 from dataset import *
-
+from transformer_nb2 import LabelSmoothing
 
 # In[2]:
 
@@ -37,9 +39,8 @@ wandb.config.update({
 # In[4]:
 
 
-data_dir = "../data-giga/"
-preload = "../preload_LM"
-outdir = "traindELMo/"
+data_dir = "data-giga/"
+outdir = "trainedELMo/"
 vocab = json.load(open(data_dir+"vocab.json", "r"))
 vocab_size = len(vocab)
 training_set = PretrainDataset(data_dir+"train_seq.json", 50, 50, vocab[PAD]) #train_seq
@@ -60,9 +61,10 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 
 device = torch.device("cuda")
 model = LanguageModel(vocab, emb_dim=1024, hidden_dim=1024, dropout=0.5).to(device)
-criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD]).to(device)
-optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-4)
-
+#criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD]).to(device)
+criterion = LabelSmoothing(size=vocab_size, padding_idx=vocab[PAD], smoothing=0.1).to(device)
+# optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3)
+optimizer = AdaBound(model.parameters(), lr=1e-3, final_lr=0.1)
 
 # In[7]:
 
@@ -105,7 +107,7 @@ def tstring(reward):
 
 
 start = 1
-epochs = 10
+epochs = 20
 
 
 # In[11]:
@@ -124,7 +126,7 @@ for e in range(start, epochs+1):
     loss_history = []
     trange = tqdm(training_generator, total=total_train, desc="epoch {}".format(e))
     
-    for src, tgt in trange:
+    for i,(src, tgt) in enumerate(trange):
         src = src.to(device)
         tgt = tgt.to(device)
         
@@ -137,7 +139,8 @@ for e in range(start, epochs+1):
         loss_history.append(loss.item())
         trange.set_postfix(**{'loss':'{:.5f}'.format(loss.item())})
         
-        _, ys = torch.max(logits, dim=-1)
+        M = torch.distributions.Categorical(logits=logits)
+        ys = M.sample()
         
         ### logging        
         wandb.log({
@@ -147,10 +150,13 @@ for e in range(start, epochs+1):
             "batch loss":loss.item(),
                   })
         ###########
+
+        if i % 5000 == 4999:
+            os.makedirs(outdir,exist_ok=True)
+            torch.save(model, outdir+"LM-check")
         
-    print("Epoch train loss:", np.mean(loss_history))
-    print("Epoch valid loss:", validation())
+    print("Epoch loss (train, valid):", np.mean(loss_history), validation())
         
     #get_ipython().system('mkdir -p trainedELMo')
     os.makedirs(outdir,exist_ok=True)
-    torch.save(model, outdir+"Model"+str(e))
+    torch.save(model, outdir+"LM"+str(e))
