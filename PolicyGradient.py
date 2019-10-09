@@ -21,9 +21,9 @@ train_path = data_dir + "train_seq.json"
 valid_path = data_dir + "valid_seq.json"
 vocab_path = data_dir + "vocab.json"
 embed_path = data_dir + "embeddings.npy"
-lm_path = data_dir + "trainedLM"
+lm_path = data_dir + "trainedLM13"
 elmo_path = data_dir + "pretrain_ELMo"
-preload = data_dir + "Pretrain114999"
+preload = None #data_dir + "Pretrain114999"
 cached_map = data_dir + "candidate_map"
 
 
@@ -46,9 +46,9 @@ validation_set = Dataset(valid_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD])
 # In[5]:
 
 
-batch_size = 32
-batch_size_inf = 32
-training_generator = Loader(training_set, batch_size=batch_size, shuffle=False)
+batch_size = 100
+batch_size_inf = 100
+training_generator = Loader(training_set, batch_size=batch_size, shuffle=True)
 validation_generator = Loader(validation_set, batch_size=batch_size_inf, shuffle=False)
 total_train = int(math.ceil(training_set.size / batch_size))
 total_valid = int(math.ceil(validation_set.size / batch_size_inf))
@@ -67,6 +67,8 @@ if not candidate_map_cached:
     torch.save(matcher.candidate_map, cached_map)
 matcher.eval()
 
+# fix error for LM class change
+LM.emb_share = False
 
 # In[7]:
 
@@ -75,15 +77,15 @@ matcher.eval()
 #     VOCAB_SIZE, VOCAB_SIZE, N=4, d_model=256,
 #     d_ff=1024, h=8, dropout=0.1, emb_share=True).to(device)
 translator = PointerGenerator(
-    hidden_dim=256, emb_dim=256, input_len=INPUT_LEN, 
-    output_len=OUTPUT_LEN, voc_size=VOCAB_SIZE, eps=1e-9).to(device)
+    hidden_dim=128, emb_dim=128, input_len=INPUT_LEN, 
+    output_len=OUTPUT_LEN, voc_size=VOCAB_SIZE, coverage=True, eps=1e-9).to(device)
 
 if preload != None:
     tmp = torch.load(preload)
     translator.load_state_dict(tmp)
 
-learning_rate = 5e-5
-weight_decay = 1e-4
+learning_rate = 1e-4
+weight_decay = 1e-5
 optimizer = torch.optim.RMSprop(translator.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
 
@@ -128,24 +130,25 @@ def tstring(reward):
 
 for e in range(start, epochs+1):
     translator.train()
-    print("[epoch]", e)
+    # print("[epoch]", e)
     loss_history = []
-    trange = tqdm(training_generator, total=total_train)
+    trange = tqdm(training_generator, total=total_train, desc="[epoch] {}".format(e))
     
     losses = []
+    baseline = 0
     for i, (src, tgt) in enumerate(trange):
         src = src.to(device)
         
         src_mask = (src != vocab[PAD]).unsqueeze(-2)
 
-        ys, log_p = translator(src=src, src_mask=src_mask, max_len=OUTPUT_LEN, start_symbol=vocab[BOS])
+        ys, log_p, covloss = translator(src=src, src_mask=src_mask, max_len=OUTPUT_LEN, start_symbol=vocab[BOS])
                 
-        reward, (cm, fm) = rewards_compute(
+        reward, (cm, fm), baseline = rewards_compute(
             matcher=matcher,
             src=src, ys=ys, log_p=log_p, adjust=adjust_r, 
-            zero_mean=zero_mean_r, unit_standard=unit_standard_r, gamma=0.99, eps=1e-9)
+            zero_mean=zero_mean_r, unit_standard=unit_standard_r, baseline=baseline, gamma=0.99, eps=1e-9)
                 
-        loss = -reward.mean()
+        loss = -reward.mean() + covloss
             
         ### logging        
         wandb.log({
@@ -155,8 +158,10 @@ for e in range(start, epochs+1):
             "reward cm":tstring(cm[0]), 
             "reward fm":tstring(fm[0]), 
             "batch loss":loss.item(),
+            "coverage weight":translator.cov_weight.data.item(),
             "batch reward context":cm.sum(-1).mean().item(),
             "batch reward fluency":fm.sum(-1).mean().item(),
+            "baseline":baseline,
                   })
         ###########
         
@@ -176,44 +181,10 @@ for e in range(start, epochs+1):
 
         if i % 5000 == 4999:
             os.makedirs("trained",exist_ok=True)
-            torch.save(translator.state_dict(), "trained/PG-"+str(i))
+            torch.save(translator.state_dict(), "trained/PG-check")
         
         
     print("Epoch train loss:", np.mean(loss_history))
     
     torch.save(translator.state_dict(), "trained/PG-e"+str(e))
-
-
-# In[ ]:
-
-
-# from ELMo import *
-# class ContextualMatchingLoss(nn.Module):
-#     def __init__(self, cm_model_path, fm_model_path, vocab_path, lda=0.11):
-#         """
-#         input: tensor w/ gradients, (batch, seqlen, vocab_sz)
-#             representing the logits (before softmax) of each word.
-        
-#         """
-#         super().__init__()
-#         self.lda = lda
-        
-#         self.domain_fluency = DomainFluency(fm_model_path, vocab_path)        
-        
-#         print(self.domain_fluency)
-        
-#     def forward(self, x, logits):
-#         batchsize, seqlen, vocab_size = logits.shape
-#         y_1hot = F.gumbel_softmax(logits, tau=1, hard=True)
-        
-#         cm = logp_contextual_matching(x, y_1hot)
-#         fm = logp_domain_fluency(y_1hot)
-        
-#         return -(cm+fm*self.lda)
-        
-#     def logp_contextual_matching(self, x, y_1hot):
-#         raise NotImplemented
-    
-#     def logp_domain_fluency(self, y_1hot):
-#         raise NotImplemented
 

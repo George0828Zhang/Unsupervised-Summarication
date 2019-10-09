@@ -47,7 +47,7 @@ class LanguageModel(nn.Module):
         if not emb_share:
             self.project = nn.Linear(hidden_dim, self.vocab_size) 
 
-        self.CE = nn.CrossEntropyLoss(ignore_index=self.vocab[PAD], reduction='none')
+        self.CE = nn.CrossEntropyLoss(reduction='none')
     
     def forward(self, word_ids):
         emb = self.embed(word_ids)
