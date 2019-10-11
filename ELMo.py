@@ -10,7 +10,7 @@ from allennlp.data.token_indexers.elmo_indexer import ELMoCharacterMapper
 from preprocessors import BOS, EOS, PAD, UNK # special tokens
 import math
 from tqdm.auto import tqdm
-
+from transformer_nb2 import PositionalEncoding
 
 def getELMo(vocab, unidir, downstream=False, mix_parameters=[1,1,1]):
     options_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
@@ -36,12 +36,13 @@ def getELMo(vocab, unidir, downstream=False, mix_parameters=[1,1,1]):
     return elmo 
 
 class LanguageModel(nn.Module):
-    def __init__(self, vocab, emb_dim, hidden_dim, dropout, emb_share=True):
+    def __init__(self, vocab, emb_dim, hidden_dim, dropout, emb_share=True, use_position=True):
         super().__init__()        
         self.vocab = vocab
         self.vocab_size = len(vocab)
                 
         self.embed = nn.Embedding(self.vocab_size, emb_dim)
+        self.position = PositionalEncoding(emb_dim, dropout) if use_position else nn.Dropout(dropout)
         self.lstm = nn.LSTM(emb_dim, hidden_dim, num_layers=2, dropout=dropout, batch_first=True, bidirectional=False)
         self.emb_share = emb_share
         if not emb_share:
@@ -50,7 +51,7 @@ class LanguageModel(nn.Module):
         self.CE = nn.CrossEntropyLoss(reduction='none')
     
     def forward(self, word_ids):
-        emb = self.embed(word_ids)
+        emb = self.position(self.embed(word_ids))
         out, (h, c) = self.lstm(emb)
         proj = F.linear(out, self.embed.weight) if self.emb_share else self.project(out)
         return proj

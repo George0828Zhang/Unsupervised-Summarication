@@ -7,6 +7,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import json
 import random
 import math
@@ -20,31 +21,28 @@ from transformer_nb2 import LabelSmoothing
 
 # In[2]:
 
+## try to use EOS instead of PAD
 
-batch_size = 72 
-batch_size_inf = 64
+
+batch_size = 256
+batch_size_inf = 256
 
 
 # In[3]:
 
 
-import wandb
 
-wandb.init(entity="george0828zhang", project="contextual-matching-policy-gradient")
-wandb.config.update({
-    "batch_size": batch_size,
-    })
 
 
 # In[4]:
 
 
-data_dir = "../data-giga/"
+data_dir = "data-20k/"
 outdir = "trainedELMo/"
 vocab = json.load(open(data_dir+"vocab.json", "r"))
 vocab_size = len(vocab)
-training_set = PretrainDataset(data_dir+"train_seq.json", 50, 50, vocab[PAD]) #train_seq
-validation_set = PretrainDataset(data_dir+"valid_seq.json", 50, 50, vocab[PAD])
+training_set = PretrainDataset(data_dir+"train_seq.json", 20, 20, vocab[EOS]) #train_seq
+validation_set = PretrainDataset(data_dir+"valid_seq.json", 20, 20, vocab[EOS])
 
 
 # In[5]:
@@ -60,20 +58,30 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 
 
 device = torch.device("cuda")
-model = LanguageModel(vocab, emb_dim=1024, hidden_dim=1024, dropout=0.5, emb_share=True).to(device)
-#criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD]).to(device)
-crit = LabelSmoothing(size=vocab_size, padding_idx=vocab[PAD], smoothing=0.1).to(device)
-def criterion(x,y):
-    x = F.log_softmax(x, -1)
-    n_token = (y != vocab[PAD]).data.sum().item()
-    return crit(x, y)/n_token
+model = LanguageModel(vocab, emb_dim=1024, hidden_dim=1024, dropout=0.1, emb_share=True).to(device)
+criterion = nn.CrossEntropyLoss(ignore_index=vocab[PAD], reduction="none").to(device)
+# crit = LabelSmoothing(size=vocab_size, padding_idx=vocab[PAD], smoothing=0.1).to(device)
+# def criterion(x,y):
+#     x = F.log_softmax(x, dim=-1)
+#     n_token = (y != vocab[PAD]).data.sum().item()
+#     # n_token = y.shape[0]
+#     return crit(x, y)/n_token
 # optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3)
-optimizer = AdaBound(model.parameters(), lr=1e-3, final_lr=0.1)
+lr = 1e-3
+w_decay = 1e-6
+optimizer = AdaBound(model.parameters(), lr=lr, final_lr=0.1, weight_decay=w_decay)
 
 # In[7]:
 
+import wandb
 
-#wandb.watch([model])
+wandb.init(entity="george0828zhang", project="contextual-matching-policy-gradient")
+wandb.config.update({
+    "batch_size": batch_size,
+    "learning rate":lr,
+    "weight decay":w_decay
+    })
+wandb.watch([model])
 
 
 # In[8]:
@@ -89,7 +97,7 @@ def validation():
             tgt = tgt.to(device)
             
             logits = model(src)
-            loss = criterion(logits.view(-1, vocab_size), tgt.view(-1))            
+            loss = criterion(logits.view(-1, vocab_size), tgt.view(-1)).mean()
 
             total_loss.append(loss.item())
             
@@ -136,6 +144,12 @@ for e in range(start, epochs+1):
         
         logits = model(src)
         loss = criterion(logits.view(-1, vocab_size), tgt.view(-1))
+
+        y0_probs = (-loss[:tgt.shape[1]]).detach().exp() # probs for first sentence
+        
+        loss = loss.mean()
+        perplex = loss.exp().item()
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -147,11 +161,14 @@ for e in range(start, epochs+1):
         ys = M.sample()
         
         ### logging        
-        wandb.log({
+        wandb.log({     
+        # print({
             "input":id2sent(src[0].cpu().numpy()),
             "output":id2sent(ys[0].cpu().numpy()),
             "target":id2sent(tgt[0].cpu().numpy()),
-            "batch loss":loss.item(),
+            "tarprob":tstring(y0_probs),
+            "perplexity":perplex,
+            "batch loss":loss.item(),            
                   })
         ###########
 

@@ -51,37 +51,30 @@ class Dataset(data.Dataset):
     def __len__(self):
         return self.size
 
+from collections import deque
 class PretrainDataset(data.Dataset):    
     def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None):
         print("loading json")
         data = json.load(open(data_name, 'r'))
         print("load json done.")
-        sum_list = data['summary']
-        data_list = data['document']
         
-        if cutoff is not None:
-            sum_list = sum_list[:cutoff]
-            data_list = data_list[:cutoff]
-        # idata -> list
-        self.size = len(sum_list)
-            
         self.src = []
-        self.tgt = []
+        self.size = len(data['document']) if cutoff==None else cutoff
+
+        for d in tqdm(data['document'][:cutoff], total=self.size):
+            chunks = len(d) // (OUTPUT_MAX+1)
+            for i in range(chunks):
+                fr = i*(OUTPUT_MAX+1)
+                to = (i+1)*(OUTPUT_MAX+1)
+                self.src.append(d[fr:to])
+
+        self.size = len(self.src)
         
         self.pad_idx = pad_idx
-        
-        for i in trange(self.size):#tqdm(range(self.size)):
-            summ = data_list[i][:OUTPUT_MAX+1]
-            src = summ[:-1]
-            # tgt = sum_list[i][:OUTPUT_MAX]
-            tgt = summ[1:]
-            self.src.append(src)
-            self.tgt.append(tgt)
-                    
-        idx = np.argsort([len(x) for x in self.tgt])[::-1] # descending
+                            
+        idx = np.argsort([len(x) for x in self.src])[::-1] # descending
         
         self.src = [ self.src[i] for i in idx]
-        self.tgt = [ self.tgt[i] for i in idx]
         
       
     def np_jagged(self, array):
@@ -92,9 +85,8 @@ class PretrainDataset(data.Dataset):
     def at(self, i, batch_size=1):
         fr = i*batch_size
         to = min(fr+batch_size, self.size)
-        src = self.np_jagged(self.src[fr:to])
-        tgt = self.np_jagged(self.tgt[fr:to])
-        return torch.from_numpy(src), torch.from_numpy(tgt)
+        src = self.np_jagged(self.src[fr:to]) # (batch, len)        
+        return torch.from_numpy(src[:,:-1]), torch.from_numpy(src[:,1:])
 
     def __len__(self):
         return self.size
