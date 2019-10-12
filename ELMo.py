@@ -68,3 +68,14 @@ class LanguageModel(nn.Module):
         CE = self.CE(logits.view(-1, self.vocab_size), tgt.view(-1))
         probs = (-CE).exp()
         return probs.view(batch_size, seqlen)
+
+class LM2(LanguageModel):
+    def __init__(self, vocab, vocab_old, emb_dim, hidden_dim, dropout, emb_share=True, use_position=True):
+        super().__init__(vocab, emb_dim, hidden_dim, dropout, emb_share=True, use_position=True)
+        self.mapping = torch.zeros(len(vocab)).long()
+        for a, b in vocab.items():
+            self.mapping[b] = vocab_old[a]
+    
+    def forward(self, word_ids):
+        old_ids = self.mapping[word_ids]
+        super().forward(old_ids)
