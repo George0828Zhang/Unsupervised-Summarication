@@ -53,15 +53,7 @@ class Translator(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 class ContextMatcher(nn.Module):
-<<<<<<< HEAD
-    def __init__(self, vocab, lmpath, unidir):
-        super().__init__()
-        self.LM = LanguageModel(vocab, unidir)
-        tmp = torch.load(lmpath)['model']
-#         tmp = torch.load(lmpath, map_location=lambda storage, loc: storage)['model']
-        self.LM.load_state_dict(tmp)
-        self.pretrained_elmo = getELMo(vocab, unidir)
-=======
+
     def __init__(self, embeddings, elmo, LM, candidate_map=None):
         """
         embeddings: pretrained embeddings, should have shape (vocab, emb_dim)
@@ -73,7 +65,6 @@ class ContextMatcher(nn.Module):
         self.pretrained_elmo = elmo
         self.embeddings = embeddings
         
->>>>>>> 25766713193edc5abd4776a5ac9302823e13a48b
         self.eps = 1e-9
 
         if not isinstance(self.embeddings, torch.Tensor):

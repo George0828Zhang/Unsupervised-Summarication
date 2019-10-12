@@ -16,7 +16,7 @@ import numpy as np
 # In[2]:
 
 
-data_dir = "/home/george/Projects/UnsupervisedSummarization/data-giga/"
+data_dir = "/hdd/unsupervised-summarization/data-giga/"
 vocab_path = data_dir + "vocab.json"
 device = torch.device("cuda")
 vocab = json.load(open(vocab_path))
@@ -31,7 +31,7 @@ def embed(t):
     embeddings = elmo(dummy, word_inputs=t)
     return embeddings['elmo_representations'][0]
 elmo.to(device)
-
+elmo.eval()
 # In[ ]:
 
 
