@@ -15,13 +15,20 @@ class StatisticalLM():
     def forward(self, word_ids):
         output = torch.zeros((word_ids.shape[0], len(self.vocab))).float()
         for b, sen in enumerate(word_ids):
-            word_list = self.lm_record['next'][sen[-1].item()]
+            
+            if len(sen) == 0:
+                word_list = self.lm_record
+            else:
+                word_list = self.lm_record['next'][str(sen[-1].item())]
+            
             for (k, v) in word_list['next'].items():
-                output[b, k] = v['count']
+                output[b, int(k)] = v['count']
             output[b] /= word_list['count']
+            
             for i in (output[b] == 0).nonzero():
-                if i.item() in self.lm_record['next']:
-                    output[b, i] = self.lm_record['next'][i.item()]['count'] / self.lm_record['count'] * self.lm_lambda
+                if str(i.item()) in self.lm_record['next']:
+                    output[b, i] = self.lm_record['next'][str(i.item())]['count'] / self.lm_record['count'] * self.lm_lambda
+        
         output = F.normalize(output, p=1, dim = -1)
         return output
 
