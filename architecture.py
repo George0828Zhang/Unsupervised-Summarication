@@ -73,8 +73,6 @@ class ContextMatcher(nn.Module):
         # l2-norm
         self.embeddings = F.normalize(self.embeddings, p=2, dim=-1)
 
-        freeze(self.LM)
-
         if candidate_map is None:
             self.candidate_map = self._get_candidate_mapping()
         else:
