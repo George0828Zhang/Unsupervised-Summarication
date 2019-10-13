@@ -77,6 +77,9 @@ class ContextMatcher(nn.Module):
             self.candidate_map = self._get_candidate_mapping()
         else:
             self.candidate_map = candidate_map
+
+        if isinstance(self.LM, nn.Module):
+            freeze(self.LM)
         
     def _get_candidate_mapping(self, batch_size = 128):
         vocab_size, emb_dim = self.embeddings.shape
@@ -170,7 +173,7 @@ class ContextMatcher(nn.Module):
         cosine = torch.matmul(y_reps, x_reps.transpose(-2, -1)) # (batch, ylen, 1)
         #scores, _ = torch.max(cosine, dim=2) # (batch, ylen)
         # likelihood = torch.sigmoid(cosine.squeeze())
-        return cosine.squeeze()
+        return cosine.squeeze() / 2 + 0.5
 
     def compute_scores(self, x, y, lbd=0.11):
         # contextual matching score
@@ -178,9 +181,9 @@ class ContextMatcher(nn.Module):
         
         # domain fluency score
         scores_fm = self.language_model(y)
-        scores_fm = 2*scores_fm - 1 # according to language GAN paper
+        # scores_fm = 2*scores_fm - 1 # according to language GAN paper
 
-        reward = scores_cm + scores_fm * lbd
+        reward = scores_cm * (scores_fm ** lbd)
         return reward, (scores_cm, scores_fm)
 
 
@@ -189,7 +192,7 @@ def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, b
     batch_size = src.shape[0]
     max_len = ys.shape[1]
     
-    rewards, (cm, fm) = matcher.compute_scores(src, ys, lbd=1) # should have same shape as ys
+    rewards, (cm, fm) = matcher.compute_scores(src, ys, lbd=0) # should have same shape as ys
     
     # should we adjust the rewards?
     if adjust:
@@ -222,6 +225,13 @@ def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, b
 
     # (batch)
     return final_reward, (cm, fm), baseline
+
+def kl_div_loss_compute(matcher, ys, all_log_p):
+    # batch_size = ys.shape[0]
+    # max_len = ys.shape[1]
+    tgt_dist = F.softmax(matcher.LM.forward(ys), dim=-1)
+    loss = F.kl_div(all_log_p, tgt_dist, reduction='batchmean')
+    return loss
 
 
 
@@ -303,7 +313,8 @@ class PointerGenerator(nn.Module):
         
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
         
-        log_probs_seq = []
+        # log_probs_seq = []
+        all_log_probs = []
 
         if self.coverage:
             covloss = torch.zeros(1).type_as(memory)
@@ -347,7 +358,7 @@ class PointerGenerator(nn.Module):
             final_dis = pgen*distri + (1.-pgen)*pointer_prob + self.epsilon
             assert (final_dis > 0).all()
             
-            log_probs = final_dis.log() #(batch, 1, vocab)
+            log_probs = final_dis.log() #(batch, vocab)
                 
             if mode == 'argmax':
                 values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
@@ -356,80 +367,16 @@ class PointerGenerator(nn.Module):
                 next_words = m.sample()
                 values = m.log_prob(next_words)
                 
-            # all_log_probs.append(log_probs)    
+            all_log_probs.append(log_probs)    
             ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
             
-            log_probs_seq.append(values)
+            # log_probs_seq.append(values)
         
-        log_probs_seq = torch.stack(log_probs_seq,1)
+        # log_probs_seq = torch.stack(log_probs_seq,1)
+        all_log_probs = torch.stack(all_log_probs, dim=1) #(batch, seq, vocab)
+        # if self.coverage:
+        #     return ys[:,1:], log_probs_seq, covloss
+        # return ys[:,1:], log_probs_seq
         if self.coverage:
-            return ys[:,1:], log_probs_seq, covloss
-        return ys[:,1:], log_probs_seq
-
-    def forward_teacher(self, src, src_mask, tgt, max_len, start_symbol, mode = 'sample'):
-        x = src
-        batch_size = x.shape[0]
-        device = x.device
-        
-        # encoder
-        x_emb = self.emb_layer(x)
-        memory, (h, c) = self.encoder(x_emb) #(batch, srclen, 2hidden)
-        h = h.transpose(0, 1).contiguous()
-        c = c.transpose(0, 1).contiguous()
-        h = h.view(batch_size, 1, h.shape[-1]*2)
-        c = c.view(batch_size, 1, c.shape[-1]*2)
-        h = h.transpose(0, 1).contiguous()
-        c = c.transpose(0, 1).contiguous()        
-
-        
-        ## decoder
-        out_h, out_c = (h, c)        
-        
-        ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
-        
-        logits = []
-        tgtlen = tgt.shape[1]
-        for i in range(max_len):
-            # 3 dimensional
-            cand = ys[:,-1:]#tgt[:,i:i+1] if i<tgtlen else ys[:,-1:]
-            
-            ans_emb = self.emb_layer(cand) #(batch, 1, emb)
-            out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c)) #(batch, 1, 2hidden)
-            
-            attention = torch.matmul(out, memory.transpose(-1, -2)) #(batch, 1, srclen)
-            attention = F.softmax(attention, dim=-1)
-            
-            context_vector = torch.matmul(attention, memory) #(batch, 1, 2hidden)
-            
-            pointer_prob = torch.zeros((batch_size, self.voc_size)).type_as(attention)
-            pointer_prob = pointer_prob.scatter_add_(dim=1, index=x, src=attention.squeeze())
-            
-            feature = torch.cat((out, context_vector), -1) #(batch, 1, 4hidden)
-            pgen_feat = torch.cat((context_vector, out, ans_emb), -1) #(batch, 1, 4hidden+emb)
-            
-            ### 3 dimensional to 2 dimensional
-            distri = self.pro_layer(feature.squeeze()) #(batch, vocab)
-            pgen = self.pgen_layer(pgen_feat.squeeze()) #(batch, 1)
-            
-            assert (pgen >= 0).all()
-            assert (distri >= 0).all()
-
-            final_dis = pgen*distri + (1.-pgen)*pointer_prob + self.epsilon
-            assert (final_dis > 0).all()
-            
-            log_probs = final_dis.log() #(batch, 1, vocab)
-                
-            if mode == 'argmax':
-                values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
-            if mode == 'sample':
-                m = torch.distributions.Categorical(logits=log_probs)
-                next_words = m.sample()
-                values = m.log_prob(next_words)
-                
-            # all_log_probs.append(log_probs)    
-            ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
-            
-            logits.append(log_probs)
-        
-        logits = torch.stack(logits,1)
-        return ys[:,1:], logits
+            return ys[:,1:], all_log_probs, covloss
+        return ys[:,1:], all_log_probs
