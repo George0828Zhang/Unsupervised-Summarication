@@ -12,6 +12,10 @@ class StatisticalLM():
         self.lm_record = lm_record
         self.vocab = vocab
         self.lm_lambda = lm_lambda
+        
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+    
     def forward(self, word_ids):
         output = torch.zeros((word_ids.shape[0], len(self.vocab))).float()
         for b, sen in enumerate(word_ids):

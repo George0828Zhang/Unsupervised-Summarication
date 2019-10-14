@@ -2,7 +2,7 @@ from transformer_nb2 import *
 
 from preprocessors import BOS, EOS, PAD, UNK
 
-from ELMo import LanguageModel, getELMo
+# from ELMo import LanguageModel, getELMo
 import torch.nn.functional as F
 from tqdm.auto import tqdm, trange
 
