@@ -2,10 +2,13 @@ from transformer_nb2 import *
 
 from preprocessors import BOS, EOS, PAD, UNK
 
-from ELMo import LanguageModel, getELMo
+# from ELMo import LanguageModel, getELMo
 import torch.nn.functional as F
-from itertools import chain
+from tqdm.auto import tqdm, trange
 
+def freeze(m: nn.Module):
+    for p in list(m.parameters()):
+        p.requires_grad = False
 
 class Translator(nn.Module):
     """
@@ -50,15 +53,97 @@ class Translator(nn.Module):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 class ContextMatcher(nn.Module):
-    def __init__(self, vocab, elmo, LM):
+
+    def __init__(self, embeddings, elmo, LM, candidate_map=None):
+        """
+        embeddings: pretrained embeddings, should have shape (vocab, emb_dim)
+        elmo: pretrained elmo module
+        LM: finetuned elmo+linear module 
+        """
         super().__init__()        
         self.LM = LM        
         self.pretrained_elmo = elmo
-
-        self.eps = 1e-9
+        self.embeddings = embeddings
         
-        for p in list(self.LM.parameters()) + list(self.pretrained_elmo.parameters()):
-            p.requires_grad = False
+        self.eps = 1e-9
+
+        if not isinstance(self.embeddings, torch.Tensor):
+            self.embeddings = torch.Tensor(self.embeddings)
+
+        # l2-norm
+        self.embeddings = F.normalize(self.embeddings, p=2, dim=-1)
+
+        if candidate_map is None:
+            self.candidate_map = self._get_candidate_mapping()
+        else:
+            self.candidate_map = candidate_map
+
+        if isinstance(self.LM, nn.Module):
+            freeze(self.LM)
+        
+    def _get_candidate_mapping(self, batch_size = 128):
+        vocab_size, emb_dim = self.embeddings.shape
+                
+        total = int(math.ceil(vocab_size/batch_size))
+        
+        output = []
+        for i in trange(total, desc="candidate-mappings"):
+            # (50000, 1024)
+            fr = i*batch_size
+            to = min(fr+batch_size, vocab_size)
+            cur = self.embeddings[fr:to] #(batch, 1024)
+            scores = torch.matmul(cur, self.embeddings.transpose(0, 1)) #(batch, 50000)
+            candidates = torch.argsort(scores, dim=-1, descending=True) #(batch, 50000)
+            output.append(candidates[:,:50].cpu()) #(batch, 50) # send to cpu to free memory
+        return torch.cat(output, dim=0)
+        
+    
+    def candidate_list(self, x, K):  
+        assert K <= 50
+        assert x.dim() <= 1
+        pool = self.candidate_map[x,:K] # (xlen, K)
+        return torch.unique(pool)
+       
+    def voronoi_split(self, candidates):
+        assert candidates.dim() == 1
+        cand_emb = self.embeddings[candidates,:] #(C, emb)
+        scores = torch.matmul(self.embeddings, cand_emb.transpose(0,1)) #(V, C)
+        cell_num = torch.argmax(scores, dim=1).squeeze() #(V,)
+        self.voronoi_mapping = cell_num
+
+    def get_cell_mates(self, wid):
+        if not hasattr(self, "voronoi_mapping"):
+            print("execute voronoi_split(candidates) first.")
+            return 
+        cell = self.voronoi_mapping[wid]
+        return (self.voronoi_mapping == cell).nonzero()
+
+    def _runtest(self, vocab, sent, qword):
+        vocab_inv = {a:b for b,a in vocab.items()}
+        words = sent.lower().split()
+        
+        wids = [vocab.get(word, vocab[UNK]) for word in words]
+        
+        print("got:", [vocab_inv[w] for w in wids], "wids:", wids)
+        
+        wids = torch.LongTensor(wids)
+        
+        out = self.candidate_list(wids, K=6)
+        candi = out
+        print("candidates:", [vocab_inv[i.item()] for i in candi])
+               
+        ### voronoi
+        self.voronoi_split(candi)
+        
+        ### testing
+        word = qword.lower().strip()
+        
+        wid = vocab.get(word, vocab[UNK])
+        
+        print("got:", vocab_inv[wid], "wids:", wid)
+        
+        mates = self.get_cell_mates(wid)
+        print("cell mates:", [vocab_inv[i.item()] for i in mates])
 
     def embed(self, t):
         dummy = torch.zeros((t.shape[0], t.shape[1], 50)).type_as(t)        
@@ -69,6 +154,7 @@ class ContextMatcher(nn.Module):
 #         return torch.log(self.LM.inference(t)+self.eps)
         return self.LM.inference(t)
 
+    
 
     def contextual_matching(self, x, y):
         # y: (batch, len)
@@ -77,36 +163,17 @@ class ContextMatcher(nn.Module):
         x_reps = self.embed(x) # (batch, xlen, emb)
         y_reps = self.embed(y) # (batch, ylen, emb)
 
-        # l2-norm on last embedding
-        x_reps = F.normalize(x_reps[:,-1:,:], p=2, dim=-1) 
-        y_reps = F.normalize(y_reps[:,-1:,:], p=2, dim=-1) # (batch, 1, emb)
+        # l2-norm on last embedding        
+        y_reps = F.normalize(y_reps, p=2, dim=-1) # (batch, ylen, emb)
 
-        cosine = torch.matmul(y_reps, x_reps.transpose(-2, -1)) # (batch, 1, 1) 
+        # should try max and mean
+        x_reps = x_reps.mean(dim=1, keepdim=True) # (batch, 1, emb)
+        x_reps = F.normalize(x_reps, p=2, dim=-1) # (batch, 1, emb)
 
-#         # this corresponds to log(Pcm(y|x))
-#         full_rw = F.logsigmoid(cosine) # (batch, 1, 1) 
-        
-#         # assign each reward to log(Pcm(y|x))/N
-#         reward = (full_rw/seqlen).repeat(1, seqlen, 1)
-#         return reward.squeeze() # (batch, seq) 
-
-        # this corresponds to (Pcm(y|x))
-        full_rw = F.sigmoid(cosine) # (batch, 1, 1) 
-        
-        # # assign each reward to (Pcm(y|x))^(1/N)
-        # reward = (full_rw**(1/seqlen)).repeat(1, seqlen, 1)
-
-        # assign each reward to (Pcm(y|x))/N
-        reward = (full_rw/seqlen).repeat(1, seqlen, 1)
-
-        return reward.squeeze() # (batch, seq) 
-
-    def contextual_matching2(self, x, y):
-        # l2-norm on last embedding
-        x_reps = F.normalize(self.embed(x), p=2, dim=-1) 
-        y_reps = F.normalize(self.embed(y), p=2, dim=-1)# (batch, xylen, emb)
-
-        # need (batch, xlen, vocab) <= (batch, xlen, emb) x (batch, vocab, emb).T()
+        cosine = torch.matmul(y_reps, x_reps.transpose(-2, -1)) # (batch, ylen, 1)
+        #scores, _ = torch.max(cosine, dim=2) # (batch, ylen)
+        # likelihood = torch.sigmoid(cosine.squeeze())
+        return cosine.squeeze() / 2 + 0.5
 
     def compute_scores(self, x, y, lbd=0.11):
         # contextual matching score
@@ -114,24 +181,18 @@ class ContextMatcher(nn.Module):
         
         # domain fluency score
         scores_fm = self.language_model(y)
+        # scores_fm = 2*scores_fm - 1 # according to language GAN paper
 
-        #reward = scores_cm + scores_fm * lbd
-        reward = (scores_cm+self.eps) * scores_fm ** lbd
+        reward = scores_cm * (scores_fm ** lbd)
         return reward, (scores_cm, scores_fm)
 
 
-def generate(seq2seq, src, max_len, vocab):
-    src_mask = (src != vocab[PAD]).unsqueeze(-2)
 
-    ys, log_p = seq2seq(src, src_mask, max_len, vocab[BOS])
-
-    return ys, log_p
-
-def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, gamma=0.99, eps=1e-9):
+def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, baseline=0, gamma=0.99, eps=1e-9):
     batch_size = src.shape[0]
     max_len = ys.shape[1]
     
-    rewards, (cm, fm) = matcher.compute_scores(src, ys, lbd=0.011) # should have same shape as ys
+    rewards, (cm, fm) = matcher.compute_scores(src, ys, lbd=0) # should have same shape as ys
     
     # should we adjust the rewards?
     if adjust:
@@ -149,18 +210,28 @@ def rewards_compute(matcher, src, ys, log_p, adjust, zero_mean, unit_standard, g
 
     # should we standarize the rewards?
     
-    r_mean = rewardTensor.mean(-1, keepdim=True)
-    r_std = rewardTensor.std(-1, keepdim=True)
-    if zero_mean:
-        rewardTensor = rewardTensor - r_mean
-    if unit_standard:
-        rewardTensor = rewardTensor/(r_std+eps)
+    # r_mean = rewardTensor.mean()#-1, keepdim=True)
+    # r_std = rewardTensor.std()#-1, keepdim=True)
+    # if zero_mean:
+    #     rewardTensor = rewardTensor - r_mean
+    # if unit_standard:
+    #     rewardTensor = rewardTensor/(r_std+eps)
+    dis = 0.99
+    baseline = baseline*dis + rewardTensor.mean().item()*(1-dis)
+    rewardTensor = rewardTensor - baseline
 
 
     final_reward = torch.sum(torch.mul(log_p, rewardTensor), -1)
 
     # (batch)
-    return final_reward, (cm, fm)
+    return final_reward, (cm, fm), baseline
+
+def kl_div_loss_compute(matcher, ys, all_log_p):
+    # batch_size = ys.shape[0]
+    # max_len = ys.shape[1]
+    tgt_dist = F.softmax(matcher.LM.forward(ys), dim=-1)
+    loss = F.kl_div(all_log_p, tgt_dist, reduction='batchmean')
+    return loss
 
 
 
@@ -193,7 +264,7 @@ def make_translator(src_vocab, tgt_vocab, N=6,
 
 
 class PointerGenerator(nn.Module):
-    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, eps=1e-8):
+    def __init__(self, hidden_dim, emb_dim, input_len, output_len, voc_size, coverage=True, eps=1e-8):
         super().__init__()
         
         self.hidden_dim = hidden_dim
@@ -203,7 +274,11 @@ class PointerGenerator(nn.Module):
         self.voc_size = voc_size
         self.teacher_prob = 1.
         self.epsilon = eps
+        self.coverage = coverage
         
+        if coverage:
+            self.cov_weight = nn.Parameter(torch.randn(1, dtype=torch.float)/10)
+
         self.emb_layer = nn.Embedding(voc_size, emb_dim)
         self.encoder = nn.LSTM(emb_dim, hidden_dim, num_layers=1, batch_first=True, bidirectional=True)
         self.decoder = nn.LSTM(emb_dim, hidden_dim*2, num_layers=1, batch_first=True)
@@ -219,7 +294,7 @@ class PointerGenerator(nn.Module):
         
     def forward(self, src, src_mask, max_len, start_symbol, mode = 'sample'):
         x = src
-        batch_size = x.shape[0]
+        batch_size, xlen = x.shape[:2]
         device = x.device
         
         # encoder
@@ -238,13 +313,30 @@ class PointerGenerator(nn.Module):
         
         ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
         
-        log_probs_seq = []
+        # log_probs_seq = []
+        all_log_probs = []
+
+        if self.coverage:
+            covloss = torch.zeros(1).type_as(memory)
+            coverage = [torch.zeros([batch_size,1, xlen]).type_as(memory)]
         
         for i in range(max_len):
             # 3 dimensional
             ans_emb = self.emb_layer(ys[:,-1].unsqueeze(1)) #(batch, 1, emb)
             out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c)) #(batch, 1, 2hidden)
             
+            ######
+            if self.coverage:
+                attention = torch.matmul(out, memory.transpose(-1, -2)) #(batch, 1, srclen)
+                attention = attention + coverage[-1] * self.cov_weight
+                attention = F.softmax(attention, dim=-1)
+                covloss += torch.min(attention, coverage[-1]).sum() / batch_size
+                coverage.append(coverage[-1]+attention)
+            else:
+                attention = torch.matmul(out, memory.transpose(-1, -2)) #(batch, 1, srclen)
+                attention = F.softmax(attention, dim=-1)
+            ######
+
             attention = torch.matmul(out, memory.transpose(-1, -2)) #(batch, 1, srclen)
             attention = F.softmax(attention, dim=-1)
             
@@ -266,7 +358,7 @@ class PointerGenerator(nn.Module):
             final_dis = pgen*distri + (1.-pgen)*pointer_prob + self.epsilon
             assert (final_dis > 0).all()
             
-            log_probs = final_dis.log() #(batch, 1, vocab)
+            log_probs = final_dis.log() #(batch, vocab)
                 
             if mode == 'argmax':
                 values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
@@ -275,78 +367,16 @@ class PointerGenerator(nn.Module):
                 next_words = m.sample()
                 values = m.log_prob(next_words)
                 
-            # all_log_probs.append(log_probs)    
+            all_log_probs.append(log_probs)    
             ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
             
-            log_probs_seq.append(values)
+            # log_probs_seq.append(values)
         
-        log_probs_seq = torch.stack(log_probs_seq,1)
-        return ys[:,1:], log_probs_seq
-
-    def forward_teacher(self, src, src_mask, tgt, max_len, start_symbol, mode = 'sample'):
-        x = src
-        batch_size = x.shape[0]
-        device = x.device
-        
-        # encoder
-        x_emb = self.emb_layer(x)
-        memory, (h, c) = self.encoder(x_emb) #(batch, srclen, 2hidden)
-        h = h.transpose(0, 1).contiguous()
-        c = c.transpose(0, 1).contiguous()
-        h = h.view(batch_size, 1, h.shape[-1]*2)
-        c = c.view(batch_size, 1, c.shape[-1]*2)
-        h = h.transpose(0, 1).contiguous()
-        c = c.transpose(0, 1).contiguous()        
-
-        
-        ## decoder
-        out_h, out_c = (h, c)        
-        
-        ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(x.data)
-        
-        logits = []
-        tgtlen = tgt.shape[1]
-        for i in range(max_len):
-            # 3 dimensional
-            cand = ys[:,-1:]#tgt[:,i:i+1] if i<tgtlen else ys[:,-1:]
-            
-            ans_emb = self.emb_layer(cand) #(batch, 1, emb)
-            out, (out_h, out_c) = self.decoder(ans_emb, (out_h, out_c)) #(batch, 1, 2hidden)
-            
-            attention = torch.matmul(out, memory.transpose(-1, -2)) #(batch, 1, srclen)
-            attention = F.softmax(attention, dim=-1)
-            
-            context_vector = torch.matmul(attention, memory) #(batch, 1, 2hidden)
-            
-            pointer_prob = torch.zeros((batch_size, self.voc_size)).type_as(attention)
-            pointer_prob = pointer_prob.scatter_add_(dim=1, index=x, src=attention.squeeze())
-            
-            feature = torch.cat((out, context_vector), -1) #(batch, 1, 4hidden)
-            pgen_feat = torch.cat((context_vector, out, ans_emb), -1) #(batch, 1, 4hidden+emb)
-            
-            ### 3 dimensional to 2 dimensional
-            distri = self.pro_layer(feature.squeeze()) #(batch, vocab)
-            pgen = self.pgen_layer(pgen_feat.squeeze()) #(batch, 1)
-            
-            assert (pgen >= 0).all()
-            assert (distri >= 0).all()
-
-            final_dis = pgen*distri + (1.-pgen)*pointer_prob + self.epsilon
-            assert (final_dis > 0).all()
-            
-            log_probs = final_dis.log() #(batch, 1, vocab)
-                
-            if mode == 'argmax':
-                values, next_words = torch.max(log_probs, dim=-1, keepdim=True)
-            if mode == 'sample':
-                m = torch.distributions.Categorical(logits=log_probs)
-                next_words = m.sample()
-                values = m.log_prob(next_words)
-                
-            # all_log_probs.append(log_probs)    
-            ys = torch.cat((ys, next_words.unsqueeze(1)), dim=1)
-            
-            logits.append(log_probs)
-        
-        logits = torch.stack(logits,1)
-        return ys[:,1:], logits
+        # log_probs_seq = torch.stack(log_probs_seq,1)
+        all_log_probs = torch.stack(all_log_probs, dim=1) #(batch, seq, vocab)
+        # if self.coverage:
+        #     return ys[:,1:], log_probs_seq, covloss
+        # return ys[:,1:], log_probs_seq
+        if self.coverage:
+            return ys[:,1:], all_log_probs, covloss
+        return ys[:,1:], all_log_probs

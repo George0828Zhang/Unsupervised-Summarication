@@ -6,10 +6,10 @@ from subprocess import check_output
 from allennlp.modules.elmo import batch_to_ids
 from allennlp.data.token_indexers.elmo_indexer import ELMoCharacterMapper
 
-UNK = "<UNK>"
+UNK = "<unk>"
 BOS = ELMoCharacterMapper.bos_token
 EOS = ELMoCharacterMapper.eos_token
-PAD = "<PAD>"
+PAD = "<pad>"
 
 class Preprocessor(object):
     def __init__(self, doc_name, summ_name, validation_split, vocab_size, token_mappings, num_threads):
@@ -48,7 +48,7 @@ class Preprocessor(object):
     def make_vocab(self):
         sum_toks = []
         doc_toks = []
-        vocab = {BOS:99999, EOS:99999, PAD:99999, UNK:99999}
+        vocab = {}
 
         for d in tqdm(self.summaries):
             ts = d.split()
@@ -62,8 +62,8 @@ class Preprocessor(object):
                 vocab[t] = vocab.get(t, 0) + 1
             doc_toks.append(ts)
             
-        vocab_sort = sorted(vocab.items(), key=lambda x: -x[1]) # descending
-        
+        vocab_sort = [(PAD, None), (BOS, None), (EOS, None)] + sorted(vocab.items(), key=lambda x: -x[1]) # descending
+        print(vocab_sort[:50])
         self.vocab = { v:i for i, (v, n) in enumerate(vocab_sort[:self.vocab_size])}
         self.summaries = sum_toks
         self.documents = doc_toks
@@ -129,30 +129,40 @@ class Preprocessor(object):
 
 def main():
     task_name = "giga"
+    task_type = "train"
 
     if task_name == "giga":
-        doc_name = "../speechlab/pointer-generator/data/train.article.txt"
-        summ_name = "../speechlab/pointer-generator/data/train.title.txt"
+        doc_name = "/hdd/giga/train.article.txt"
+        summ_name = "/hdd/giga/train.title.txt"
+        if task_type == "eval":
+            doc_name = "../speechlab/pointer-generator/data/Giga/input.txt"
+            summ_name = "../speechlab/pointer-generator/data/Giga/task1_ref0.txt"
     else:
         doc_name = "../pointer-generator/data2/train.txt.src"
         summ_name = "../pointer-generator/data2/train.txt.tgt.tagged"
 
-    out_dir = "data-{}/".format(task_name)
+    out_dir = "/hdd/giga/data-20k/"#"data-{}/".format(task_name)
     vocab_name = out_dir+"vocab.json"
-    data_seq_name = out_dir+"train_seq.json"
+    data_seq_name = out_dir+ ("train_seq.json" if task_type == "train" else "test_seq.json")
     valid_seq_name = out_dir+"valid_seq.json"
 
     num_threads = 4
-    corpus_size = 88888888
-    validation_split = 0.002
+    corpus_size = 888888
+    validation_split = 0.005 if task_type == "train" else 0
 
     if task_name == 'giga':
         token_mappings = {'<unk>':UNK}#, '-lrb-':'(', '-rrb-':')'}
     else:
         token_mappings = {}
     
-    p = Preprocessor(doc_name, summ_name, validation_split, 50000, token_mappings, num_threads)
-    p.process()
+
+
+    p = Preprocessor(doc_name, summ_name, validation_split, 20000, token_mappings, num_threads)
+    if task_type == "eval":
+        vocab = json.load(open(vocab_name, "r"))
+        p.process(vocab=vocab)
+    else:
+        p.process()
     p.export(vocab_name,data_seq_name,valid_seq_name)
 
 if __name__ == "__main__":
