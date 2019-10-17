@@ -23,14 +23,38 @@ class LanguageModel(nn.Module):
         self.emb_share = emb_share
         if not emb_share:
             self.project = nn.Linear(hidden_dim, self.vocab_size) 
-
-        self.CE = nn.CrossEntropyLoss(reduction='none')
     
     def forward(self, word_ids):
         emb = self.position(self.embed(word_ids))
         out, (h, c) = self.lstm(emb)
         proj = F.linear(out, self.embed.weight) if self.emb_share else self.project(out)
-        return proj
+        return F.log_softmax(proj, dim=-1)
+
+    def decode(self, src, max_len, mode='sample'):
+        batch_size = src.size(0)
+        word_ids = src[:,:1] # should be BOS (batch, 1)
+        logits = []
+
+        for i in range(max_len):
+            emb = self.position(self.embed(word_ids[:,-1:])) # (batch, 1, emb)
+            out, (h, c) = self.lstm(emb, None if i == 0 else (h, c)) # (batch, 1, hidden)
+            proj = F.linear(out, self.embed.weight) if self.emb_share else self.project(out)
+            proj = F.log_softmax(proj, dim=-1) # (batch, 1, vocab)
+
+            if mode == 'argmax':
+                values, next_words = torch.max(proj, dim=-1, keepdim=True)
+            elif mode == 'sample':
+                m = torch.distributions.Categorical(logits=proj)
+                next_words = m.sample()
+            else:
+                raise
+
+            logits.append(proj)
+            word_ids = torch.cat((word_ids, next_words), dim=1)
+        logits = torch.cat(logits, dim=1)
+        return word_ids[:,1:], logits
+
+
 
     def inference(self, sent):
         # (batch, len)
@@ -40,7 +64,7 @@ class LanguageModel(nn.Module):
         tgt = sent.contiguous()
         
         logits = self.forward(src) # (1, len, vocab)
-        
-        CE = self.CE(logits.view(-1, self.vocab_size), tgt.view(-1))
+            
+        CE = F.cross_entropy(logits.view(-1, self.vocab_size), tgt.view(-1), reduction='none')
         probs = (-CE).exp()
         return probs.view(batch_size, seqlen)

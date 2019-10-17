@@ -53,7 +53,7 @@ class Dataset(data.Dataset):
 
 from collections import deque
 class PretrainDataset(data.Dataset):    
-    def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None):
+    def __init__(self, data_name, OUTPUT_MIN, OUTPUT_MAX, pad_idx, cutoff=None):
         print("loading json")
         data = json.load(open(data_name, 'r'))
         print("load json done.")
@@ -62,11 +62,14 @@ class PretrainDataset(data.Dataset):
         self.size = len(data['document']) if cutoff==None else cutoff
 
         for d in tqdm(data['document'][:cutoff], total=self.size):
-            chunks = len(d) // (OUTPUT_MAX+1)
+            # if OUTPUT_MIN <= len(d) <= OUTPUT_MAX:
+            #     self.src.append(d)            
+            chunks = len(d) // (OUTPUT_MAX+1) + 1
             for i in range(chunks):
                 fr = i*(OUTPUT_MAX+1)
                 to = (i+1)*(OUTPUT_MAX+1)
-                self.src.append(d[fr:to])
+                if OUTPUT_MIN <= len(d[fr:to]):
+                    self.src.append(d[fr:to])
 
         self.size = len(self.src)
         
@@ -86,7 +89,7 @@ class PretrainDataset(data.Dataset):
         fr = i*batch_size
         to = min(fr+batch_size, self.size)
         src = self.np_jagged(self.src[fr:to]) # (batch, len)        
-        return torch.from_numpy(src[:,:-1]), torch.from_numpy(src[:,1:])
+        return torch.from_numpy(src)
 
     def __len__(self):
         return self.size
