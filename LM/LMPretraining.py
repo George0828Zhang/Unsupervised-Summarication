@@ -23,29 +23,29 @@ from transformer_nb2 import LabelSmoothing, PositionalEncoding
 ## try to use EOS instead of PAD
 use_wandb = True
 
-batch_size = 88 # (464, 20) (88, 100)
+batch_size = 144 # (464, 20) (88, 100)
 batch_size_inf = batch_size
 
 eps = 1e-10
 lr = {'g':1e-5, 'd':5e-3}
 w_decay = {'g':1e-6, 'd':1e-4}
-train_iters = {'g':5, 'd':5}
+update_iters = {'g':5, 'd':5}
 gamma = 0.79
-update_freq = 0.999
+update_baseline = 0.999
 mode = "decode"
 
 
-data_dir = "data-wiki103/"
+data_dir = os.path.abspath("../data-fixed/")+"/"
 outdir = "GANLM/"
 vocab = json.load(open(data_dir+"vocab.json", "r"))
 vocab_size = len(vocab)
-training_set = PretrainDataset(data_dir+"train_seq.json", 7, 100, vocab[EOS]) #train_seq
-validation_set = PretrainDataset(data_dir+"valid_seq.json", 7, 100, vocab[EOS])
+training_set = PretrainDataset(data_dir+"train_seq.json", 7, 50, vocab[EOS]) #train_seq
+validation_set = PretrainDataset(data_dir+"valid_seq.json", 7, 50, vocab[EOS])
 
 
 
 
-training_generator = Loader(training_set, batch_size=batch_size, shuffle=False)
+training_generator = Loader(training_set, batch_size=batch_size, shuffle=True)
 validation_generator = Loader(validation_set, batch_size=batch_size_inf, shuffle=False)
 total_train = int(math.ceil(training_set.size / batch_size))
 total_valid = int(math.ceil(validation_set.size / batch_size_inf))
@@ -84,8 +84,8 @@ D_model = Discriminator(vocab, emb_dim=128, hidden_dim=128, dropout=0.4).to(devi
 
 # optimizer_g = torch.optim.Adam(model.parameters(), betas=(0.5,0), lr=lr['g'], weight_decay=w_decay['g'])
 # optimizer_d = torch.optim.Adam(D_model.parameters(), betas=(0.5,0), lr=lr['d'], weight_decay=w_decay['d'])
-optimizer_g = torch.optim.RMSprop(model.parameters(), lr=lr['g'], weight_decay=w_decay['g'])
-optimizer_d = torch.optim.RMSprop(D_model.parameters(), lr=lr['d'], weight_decay=w_decay['d'])
+optimizer_g = torch.optim.RMSprop(model.parameters(), lr=lr['g']/update_iters['g'], weight_decay=w_decay['g'])
+optimizer_d = torch.optim.RMSprop(D_model.parameters(), lr=lr['d']/update_iters['d'], weight_decay=w_decay['d'])
 
 
 
@@ -100,9 +100,9 @@ if use_wandb:
         "learning rate":lr,
         "weight decay":w_decay,
         "gamma":gamma,
-        "update freq":update_freq,
+        "update baseline":update_baseline,
         "mode":mode,
-        "train iters":train_iters
+        "update iters":update_iters
         })
 
 # wandb.watch([model])
@@ -124,16 +124,20 @@ def mean(l):
 start = 1
 epochs = 10
 
-def train_D(N, src, tgt):
+def train_D(update, x, N=1):
     model.eval()
     D_model.train()
+
+    src = x[:,:-1]
+    tgt = x[:,1:]
 
     bar = range(N) #trange(N, desc="train D", leave=False)
     h_real_scores = []
     h_fake_scores = []
     h_D_loss = []
 
-    optimizer_d.zero_grad()
+    if update:
+        optimizer_d.zero_grad()
 
     for i in bar:
         with torch.no_grad():            
@@ -164,7 +168,8 @@ def train_D(N, src, tgt):
         h_fake_scores.append(fake_score.mean().item())
         h_D_loss.append(loss.item())
 
-    optimizer_d.step()
+    if update:
+        optimizer_d.step()
     return mean(h_real_scores), mean(h_fake_scores), mean(h_D_loss)
 
 def discount_r(rewards, gamma):
@@ -178,33 +183,50 @@ def discount_r(rewards, gamma):
     # (batch,)
     return torch.stack(rewards_adjust, dim=1)
 
-def train_G(N, src, baseline, gamma):
+def train_G(update, x, baseline, gamma, N=1):
     model.train()
     D_model.eval()
 
-    bar = range(N) #trange(N, desc="train G", leave=False)
+    src = x[:,:-1]
+    tgt = x[:,1:]
+
+    bar = range(N*2) #trange(N, desc="train G", leave=False)
     h_G_loss = []
     h_reward = []
-    optimizer_g.zero_grad()
+    if update:
+        optimizer_g.zero_grad()
 
     for i in bar:
-        if mode == "decode":
-            ys, logits = model.decode(src, max_len=src.size(1))
-            M = torch.distributions.Categorical(logits=logits)
+        if i % 2:
+            # generated samples
+            if mode == "decode":
+                ys, logits = model.decode(src, max_len=src.size(1))
+                M = torch.distributions.Categorical(logits=logits)
+                logprobs = M.log_prob(ys)
+            else:
+                logits = model(src)
+                M = torch.distributions.Categorical(logits=logits)
+                ys = M.sample() # (batch, len)
+                logprobs = M.log_prob(ys)
+
+            with torch.no_grad():
+                rewards = 2*D_model(ys) - 1 # (batch, len)
         else:
+            # teacher forced samples
             logits = model(src)
             M = torch.distributions.Categorical(logits=logits)
-            ys = M.sample() # (batch, len)
-
-        with torch.no_grad():
-            rewards = 2*D_model(ys) - 1 # (batch, len)
+            logprobs = M.log_prob(tgt)
+            rewards = logprobs*0 + 1 
+        
+        #rewards = torch.cat((rewards, rewards*0+1), dim=0)
+        #logprobs = torch.cat((logp_gen, logp_real), dim=0)
 
         rewards = discount_r(rewards, gamma)
         
         rewardTensor_based = rewards - baseline
-        baseline = baseline*update_freq + rewards.mean().item()*(1-update_freq)   
+        baseline = baseline*update_baseline + rewards.mean().item()*(1-update_baseline)   
       
-        loss = -(M.log_prob(ys)*rewardTensor_based).sum()
+        loss = -(logprobs*rewardTensor_based).sum() / 2 # because 2 passes
         
         loss.backward()
         
@@ -212,7 +234,8 @@ def train_G(N, src, baseline, gamma):
         h_G_loss.append(loss.item())
         h_reward.append(rewards.mean().item())
 
-    optimizer_g.step()
+    if update:
+        optimizer_g.step()
 
     return mean(h_reward), mean(h_G_loss), baseline
 
@@ -222,22 +245,21 @@ for e in range(start, epochs+1):
     loss_history = []
     bigbar = tqdm(training_generator, total=total_train, desc="epoch {}".format(e))
     
-    for i,src in enumerate(bigbar):
+    for step,src in enumerate(bigbar):
         src = src.to(device)
-        # tgt = tgt.to(device)
-        tgt = src[:,1:]
-        src = src[:,:-1]
-
+        
         # train_iters
-        realsc, fakesc, d_loss = train_D(train_iters['d'], src=src, tgt=tgt)
+        update_D = (step % update_iters['d']) == 0
+        update_G = (step % update_iters['g']) == 0
+        realsc, fakesc, d_loss = train_D(update_D, x=src)
 
-        reward, g_loss, baseline = train_G(train_iters['g'], src=src, baseline=baseline, gamma=gamma)
+        reward, g_loss, baseline = train_G(update_G, x=src, baseline=baseline, gamma=gamma)
 
         
-        logits = model(src[:1]) # (1, len, vocab)
+        logits = model(src[:1,:-1]) # (1, len, vocab)
         M = torch.distributions.Categorical(logits=logits)
         ys = M.sample() # (1, len)
-        y0_logp = M.log_prob(tgt[:1]).detach()
+        y0_logp = M.log_prob(src[:1,1:]).detach()
         ln_perplex = (-y0_logp.mean()).item()
         y0_probs = y0_logp.exp() # (1, len)
 
@@ -252,7 +274,6 @@ for e in range(start, epochs+1):
             wandb.log({   
                 "input":id2sent(src[0].cpu().numpy()),
                 "output":id2sent(ys[0].cpu().numpy()),
-                "target":id2sent(tgt[0].cpu().numpy()),
                 "tarprob":tstring(y0_probs[0]),
                 "log perplexity":ln_perplex,
                 "real score":realsc, 
@@ -265,7 +286,7 @@ for e in range(start, epochs+1):
             ###########        
         
 
-        if i % 5000 == 4999:
+        if step % 5000 == 4999:
             os.makedirs(outdir,exist_ok=True)
             torch.save(model, outdir+"LM-check")
         

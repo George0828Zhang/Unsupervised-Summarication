@@ -12,13 +12,13 @@ def perplexity(lm, corpus_gen, total, device=torch.device("cuda")):
         total_xent = []
         trange = tqdm(corpus_gen, total=total)
         # CE = nn.CrossEntropyLoss(reduction='none').to(device)
-        for src, tgt in trange:
+        for src in trange:
             src = src.to(device)
-            tgt = tgt.to(device)
+            tgt = src[:,:-1]
+            src = src[:,1:]
             batch_size, seqlen = tgt.shape[:2]
 
-            logits = lm.forward(src)
-            #xentloss = lm.CE(logits.contiguous().view(-1, lm.vocab_size), tgt.contiguous().view(-1))# negative log probs           
+            logits = lm.forward(src)          
             xentloss = F.cross_entropy(logits.contiguous().view(-1, lm.vocab_size), tgt.contiguous().view(-1), reduction='none')
             trange.set_postfix(xent=xentloss.mean().item())
             total_xent.append(xentloss) # (batch * seqlen,)
@@ -26,9 +26,9 @@ def perplexity(lm, corpus_gen, total, device=torch.device("cuda")):
     return ppl.item()
 
 def LM_perplex():
-    batch_size = 256
-    data_dir = "data-fixed/"
-    preload = "GANLM/LM-check"
+    batch_size = 16
+    data_dir = "../data-wiki103/"
+    preload = "LM-wiki/LM8"
     vocab = json.load(open(data_dir+"vocab.json", "r"))
     vocab_size = len(vocab)
 
@@ -38,7 +38,7 @@ def LM_perplex():
     
     pool = ["test", "valid"]
     for name in pool:
-        testing_set = PretrainDataset(data_dir+name+"_seq.json", 20, 20, vocab[EOS]) #train_seq
+        testing_set = PretrainDataset(data_dir+name+"_seq.json", 100, 100, vocab[EOS]) #train_seq
 
         testing_generator = Loader(testing_set, batch_size=batch_size, shuffle=False)
         total_test = int(math.ceil(testing_set.size / batch_size))
