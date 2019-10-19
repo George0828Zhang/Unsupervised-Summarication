@@ -68,3 +68,32 @@ class LanguageModel(nn.Module):
         CE = F.cross_entropy(logits.view(-1, self.vocab_size), tgt.view(-1), reduction='none')
         probs = (-CE).exp()
         return probs.view(batch_size, seqlen)
+
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+class GPT2LM(nn.Module):
+    def __init__(self, start_index,):
+        super().__init__()
+        self.gpt2 = GPT2LMHeadModel.from_pretrained('gpt2')
+        self.vocab_size = self.gpt2.config.vocab_size
+
+        self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        self.start_index = start_index
+
+    def forward(self, word_ids):
+        return self.gpt2(word_ids)
+
+    def inference(self, sent):
+        # (batch, len)
+        batch_size, seqlen = sent.shape[:2]
+        src = torch.ones(batch_size, 1).fill_(self.start_index).type_as(sent.data)
+        src = torch.cat((src, sent[:,:-1]), 1)
+        tgt = sent.contiguous()
+        
+        logits, past = self.forward(src) # (1, len, vocab)
+            
+        CE = F.cross_entropy(logits.view(-1, self.vocab_size), tgt.view(-1), reduction='none')
+        probs = (-CE).exp()
+        return probs.view(batch_size, seqlen)
+
+
+

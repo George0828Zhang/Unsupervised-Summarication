@@ -182,7 +182,6 @@ def main():
     task_type = "train"
     out_dir = "data-giga-gpt2/"#"data-{}/".format(task_name)
     num_threads = 4
-    corpus_size = 100#999999999
     validation_split = 0.005 if task_type == "train" else 0
 
     if task_name == "giga":
@@ -190,7 +189,7 @@ def main():
         summ_name = "/home/george/Projects/Datasets/giga/train.title.txt"
         if task_type == "eval":
             doc_name = "/home/george/Projects/Datasets/giga/test.article.txt"
-        summ_name = "/home/george/Projects/Datasets/giga/test.title.txt"
+            summ_name = "/home/george/Projects/Datasets/giga/test.title.txt"
     elif task_name == "wiki103":
         doc_name = "/home/george/Projects/Datasets/wikitext-103/wiki.train.tokens.2"
         summ_name = ""
