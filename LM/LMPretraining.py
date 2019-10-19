@@ -23,15 +23,16 @@ from transformer_nb2 import LabelSmoothing, PositionalEncoding
 ## try to use EOS instead of PAD
 use_wandb = True
 
-batch_size = 144 # (464, 20) (88, 100)
+batch_size = 128 # (464, 20) (88, 100)
 batch_size_inf = batch_size
 
+device = torch.device("cuda")
 eps = 1e-10
-lr = {'g':1.67e-4, 'd':2.98e-3}
+lr = {'g':2e-5, 'd':3e-3}
 w_decay = {'g':1e-6, 'd':1e-4}
 update_iters = {'g':5, 'd':5}
 gamma = 0.79
-update_baseline = 0.23
+update_baseline = 0.99
 mode = "decode"
 
 
@@ -39,13 +40,13 @@ data_dir = os.path.abspath("../data-wiki103/")+"/"
 outdir = "GANLM/"
 vocab = json.load(open(data_dir+"vocab.json", "r"))
 vocab_size = len(vocab)
-training_set = PretrainDataset(data_dir+"valid_seq.json", 7, 100, vocab[EOS]) #train_seq
+training_set = PretrainDataset(data_dir+"train_seq.json", 7, 100, vocab[EOS]) #train_seq
 validation_set = PretrainDataset(data_dir+"valid_seq.json", 7, 100, vocab[EOS])
 
 
 
 
-training_generator = Loader(training_set, batch_size=batch_size, shuffle=False)
+training_generator = Loader(training_set, batch_size=batch_size, shuffle=True)
 validation_generator = Loader(validation_set, batch_size=batch_size_inf, shuffle=False)
 total_train = int(math.ceil(training_set.size / batch_size))
 total_valid = int(math.ceil(validation_set.size / batch_size_inf))
@@ -53,7 +54,6 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 
 
 
-device = torch.device("cuda")
 model = LanguageModel(vocab, emb_dim=256, hidden_dim=256, dropout=0.1, emb_share=True, use_position=False).to(device)
 
 
@@ -66,7 +66,7 @@ class Discriminator(nn.Module):
                 
         self.embed = nn.Embedding(self.vocab_size, emb_dim)
         self.position = PositionalEncoding(emb_dim, dropout) if use_position else nn.Dropout(dropout)
-        self.lstm = nn.LSTM(emb_dim, hidden_dim, num_layers=1, dropout=dropout, batch_first=True, bidirectional=False)
+        self.lstm = nn.LSTM(emb_dim, hidden_dim, num_layers=2, dropout=dropout, batch_first=True, bidirectional=False)
         self.project = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Dropout(dropout),
@@ -80,13 +80,13 @@ class Discriminator(nn.Module):
         proj = self.project(out).squeeze(-1)
         return torch.sigmoid(proj)
 
-D_model = Discriminator(vocab, emb_dim=256, hidden_dim=256, dropout=0.4).to(device)
+D_model = Discriminator(vocab, emb_dim=128, hidden_dim=128, dropout=0.4).to(device)
 
 
-optimizer_g = torch.optim.Adam(model.parameters(), betas=(0.5,0), lr=lr['g']/update_iters['g'], weight_decay=w_decay['g'])
-optimizer_d = torch.optim.Adam(D_model.parameters(), betas=(0.5,0), lr=lr['d']/update_iters['d'], weight_decay=w_decay['d'])
-#optimizer_g = torch.optim.RMSprop(model.parameters(), lr=lr['g']/update_iters['g'], weight_decay=w_decay['g'])
-#optimizer_d = torch.optim.RMSprop(D_model.parameters(), lr=lr['d']/update_iters['d'], weight_decay=w_decay['d'])
+#optimizer_g = torch.optim.Adam(model.parameters(), betas=(0.5,0), lr=lr['g'], weight_decay=w_decay['g'])
+#optimizer_d = torch.optim.Adam(D_model.parameters(), betas=(0.5,0), lr=lr['d'], weight_decay=w_decay['d'])
+optimizer_g = torch.optim.RMSprop(model.parameters(), lr=lr['g'], weight_decay=w_decay['g'])
+optimizer_d = torch.optim.RMSprop(D_model.parameters(), lr=lr['d'], weight_decay=w_decay['d'])
 
 
 
@@ -137,8 +137,6 @@ def train_D(update, x, N=1):
     h_fake_scores = []
     h_D_loss = []
 
-    if update:
-        optimizer_d.zero_grad()
 
     for i in bar:
         with torch.no_grad():            
@@ -162,7 +160,8 @@ def train_D(update, x, N=1):
 
         loss = loss_real + loss_fake
 
-        
+        loss /= update_iters['d']
+
         loss.backward()
 
         h_real_scores.append(real_score.mean().item())
@@ -171,6 +170,7 @@ def train_D(update, x, N=1):
 
     if update:
         optimizer_d.step()
+        optimizer_d.zero_grad()
     return mean(h_real_scores), mean(h_fake_scores), mean(h_D_loss)
 
 def discount_r(rewards, gamma):
@@ -194,8 +194,6 @@ def train_G(update, x, baseline, gamma, N=1, use_teacher=False):
     bar = range(N*2 if use_teacher else N) #trange(N, desc="train G", leave=False)
     h_G_loss = []
     h_reward = []
-    if update:
-        optimizer_g.zero_grad()
 
     for i in bar:
         if i % 2 or not use_teacher:
@@ -240,6 +238,7 @@ def train_G(update, x, baseline, gamma, N=1, use_teacher=False):
 
     if update:
         optimizer_g.step()
+        optimizer_g.zero_grad()
 
     return mean(h_reward), mean(h_G_loss), baseline
 
@@ -247,7 +246,7 @@ baseline = 0
 for e in range(start, epochs+1):
     model.train()
     loss_history = []
-    bigbar = tqdm(training_generator, total=total_train, desc="epoch {}".format(e))
+    bigbar = tqdm(training_generator, total=total_train, desc="epoch {}".format(e), postfix={"real":0, "fake":0, "ln_ppl":0, "gloss":0})
     
     for step,src in enumerate(bigbar):
         src = src.to(device)
