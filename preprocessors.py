@@ -1,3 +1,4 @@
+import os
 import json
 import numpy as np
 from tqdm import tqdm#tqdm_notebook as tqdm
@@ -5,6 +6,8 @@ from multiprocessing import Pool
 from subprocess import check_output
 from allennlp.modules.elmo import batch_to_ids
 from allennlp.data.token_indexers.elmo_indexer import ELMoCharacterMapper
+
+from transformers import GPT2Tokenizer
 
 UNK = "<unk>"
 BOS = ELMoCharacterMapper.bos_token
@@ -25,18 +28,19 @@ class Preprocessor(object):
             for i,line in tqdm(enumerate(f), total=total):
                 line = self.swap(line.strip())
                 self.documents.append(line)
-        with open(summ_name, newline='', encoding='utf-8') as f:
-            total = self.getlines(summ_name)
-            for i,line in tqdm(enumerate(f), total=total):
-                line = self.swap(line.strip())
-                self.summaries.append(line)
+        if summ_name:
+            with open(summ_name, newline='', encoding='utf-8') as f:
+                total = self.getlines(summ_name)
+                for i,line in tqdm(enumerate(f), total=total):
+                    line = self.swap(line.strip())
+                    self.summaries.append(line)
                 
-        self.size = len(self.summaries)
+        self.size = len(self.documents)
         
     
-    def process(self, vocab=None):
+    def process(self, vocab=None, lower=True):
         print("[info] making vocabulary...")
-        self.make_vocab()
+        self.make_vocab(lower=lower)
         
         if vocab is not None:
             print("[info] using external vocabulary !!!")
@@ -45,18 +49,22 @@ class Preprocessor(object):
         print("[info] converting to indices...")
         self.convert_all_to_ids()  
                 
-    def make_vocab(self):
+    def make_vocab(self, lower):
         sum_toks = []
         doc_toks = []
         vocab = {}
 
         for d in tqdm(self.summaries):
+            if lower:
+                d = d.lower()
             ts = d.split()
             for t in ts:
                 vocab[t] = vocab.get(t, 0) + 1
             sum_toks.append(ts)
 
         for d in tqdm(self.documents):
+            if lower:
+                d = d.lower()
             ts = d.split()
             for t in ts:
                 vocab[t] = vocab.get(t, 0) + 1
@@ -81,6 +89,9 @@ class Preprocessor(object):
         else:
             self.summ_seqs = [self.tokens_to_ids(s) for s in tqdm(self.summaries)]
             self.docu_seqs = [self.tokens_to_ids(s) for s in tqdm(self.documents)]
+            # with Pool(self.threads) as p:
+            #     self.summ_seqs = list(p.imap(self.tokens_to_ids, tqdm(self.summaries)))
+            #     self.docu_seqs = list(p.imap(self.tokens_to_ids, tqdm(self.documents)))
     
     def export(self, vocab_name=None, data_seq_name="tmp.json", valid_seq_name=None):
         if vocab_name is not None:
@@ -125,45 +136,105 @@ class Preprocessor(object):
         #return int(total[0].split()[0])
         return int(check_output(["wc", "-l", name]).split()[0])
 
+class GPT2Preprocessor(Preprocessor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+
+    def process(self, vocab=None):        
+        self.summ_seqs = [self.tokenizer.encode(s) for s in tqdm(self.summaries)]
+        self.docu_seqs = [self.tokenizer.encode(s) for s in tqdm(self.documents)]
+
+    def export(self, vocab_name=None, data_seq_name="tmp.json", valid_seq_name=None):
+        if vocab_name is not None:
+            print("[info] dumping vocab...")
+            self.tokenizer.save_vocabulary(os.path.dirname(vocab_name))
+        
+        seqdata = {'summary':[], 'document':[]}
+        valseqdata = {'summary':[], 'document':[]}
+        
+        if self.validation_split > 0:
+            print("[info] splitting data...")
+            num_summ = self.size
+            
+            val_set = int(self.validation_split*num_summ)
+
+            valseqdata['summary'] = self.summ_seqs[-val_set:]
+            valseqdata['document'] = self.docu_seqs[-val_set:]
+
+            seqdata['summary'] = self.summ_seqs[:-val_set]
+            seqdata['document'] = self.docu_seqs[:-val_set]
+            
+            print("[info] dumping validation data...")
+            json.dump(valseqdata, open(valid_seq_name, 'w'))
+        else:
+            seqdata['summary'] = self.summ_seqs
+            seqdata['document'] = self.docu_seqs
+        
+        print("[info] dumping training data...")
+        json.dump(seqdata, open(data_seq_name, 'w'))
+
+
 
 
 def main():
     task_name = "giga"
     task_type = "train"
+    out_dir = "data-giga-gpt2/"#"data-{}/".format(task_name)
+    num_threads = 4
+    validation_split = 0.005 if task_type == "train" else 0
 
     if task_name == "giga":
-        doc_name = "/hdd/giga/train.article.txt"
-        summ_name = "/hdd/giga/train.title.txt"
+        doc_name = "/home/george/Projects/Datasets/giga/train.article.txt"
+        summ_name = "/home/george/Projects/Datasets/giga/train.title.txt"
         if task_type == "eval":
-            doc_name = "../speechlab/pointer-generator/data/Giga/input.txt"
-            summ_name = "../speechlab/pointer-generator/data/Giga/task1_ref0.txt"
+            doc_name = "/home/george/Projects/Datasets/giga/test.article.txt"
+            summ_name = "/home/george/Projects/Datasets/giga/test.title.txt"
+    elif task_name == "wiki103":
+        doc_name = "/home/george/Projects/Datasets/wikitext-103/wiki.train.tokens.2"
+        summ_name = ""
+        if task_type == "eval":
+            doc_name = "/home/george/Projects/Datasets/wikitext-103/wiki.test.tokens.2"
+        validation_split = 0
     else:
         doc_name = "../pointer-generator/data2/train.txt.src"
         summ_name = "../pointer-generator/data2/train.txt.tgt.tagged"
 
-    out_dir = "/hdd/giga/data-20k/"#"data-{}/".format(task_name)
+    
     vocab_name = out_dir+"vocab.json"
     data_seq_name = out_dir+ ("train_seq.json" if task_type == "train" else "test_seq.json")
     valid_seq_name = out_dir+"valid_seq.json"
 
-    num_threads = 4
-    corpus_size = 888888
-    validation_split = 0.005 if task_type == "train" else 0
+    
 
     if task_name == 'giga':
         token_mappings = {'<unk>':UNK}#, '-lrb-':'(', '-rrb-':')'}
     else:
-        token_mappings = {}
-    
+        token_mappings = {}    
 
 
-    p = Preprocessor(doc_name, summ_name, validation_split, 20000, token_mappings, num_threads)
-    if task_type == "eval":
+    p = GPT2Preprocessor(doc_name, summ_name, validation_split, 20000, token_mappings, num_threads)
+    if task_type == "eval" and not isinstance(p, GPT2Preprocessor):
         vocab = json.load(open(vocab_name, "r"))
         p.process(vocab=vocab)
     else:
         p.process()
+
+    os.makedirs(out_dir,exist_ok=True)
     p.export(vocab_name,data_seq_name,valid_seq_name)
 
 if __name__ == "__main__":
     main()
+
+    # data = json.load(open("data-wiki103/train_seq.json", 'r'))
+    # print("load json done.")
+    # sum_list = data['summary']
+    # data_list = data['document']
+
+    # print(len(sum_list),len(data_list))
+
+    # import matplotlib.pyplot as plt
+    # lens = [len(s) for s in data_list]
+    # plt.hist(lens, bins=50)
+    # plt.show()
+    # print(np.mean(lens), np.std(lens))
