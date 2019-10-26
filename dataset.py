@@ -17,7 +17,7 @@ class Dataset(data.Dataset):
             sum_list = sum_list[:cutoff]
             data_list = data_list[:cutoff]
         # idata -> list
-        self.size = len(sum_list)
+        self.size = len(data_list)
             
         self.src = []
         self.tgt = []

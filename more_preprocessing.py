@@ -99,7 +99,7 @@ def get_candidate_mapping(embeddings, path_out, batch_size = 128):
     return mappings
 
 def main(do_LM=True, do_ELMo=True, do_Embed=True, do_Candi=True):
-    data_dir = "data-fixed/"
+    data_dir = "data-giga-gpt2/"
     lm_path = data_dir+"LM-check"    
     vocab_path = data_dir+"vocab.json"
     old_vocab_path = data_dir+"old_vocab.json"
@@ -112,11 +112,11 @@ def main(do_LM=True, do_ELMo=True, do_Embed=True, do_Candi=True):
     ################
 
     vocab = json.load(open(vocab_path, "r"))
-    old_vocab = json.load(open(old_vocab_path, "r"))
 
     # first fix LM
     if do_LM:
-        print("fixing LM...")
+        print("fixing LM...")        
+        old_vocab = json.load(open(old_vocab_path, "r"))
         fix_LM(lm_path, lm_path_out, vocab, old_vocab)
 
     # then make ELMo
@@ -135,4 +135,4 @@ def main(do_LM=True, do_ELMo=True, do_Embed=True, do_Candi=True):
         get_candidate_mapping(emb, mapping_out)
 
 if __name__ == "__main__":
-    main(do_LM=False, do_ELMo=False)
+    main(do_LM=False)
