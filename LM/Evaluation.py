@@ -1,6 +1,5 @@
 from NeuralLM import LanguageModel
 from dataset import *
-from preprocessors import BOS, EOS, UNK, PAD
 import torch
 import json
 import math
@@ -14,8 +13,8 @@ def perplexity(lm, corpus_gen, total, device=torch.device("cuda")):
         # CE = nn.CrossEntropyLoss(reduction='none').to(device)
         for src in trange:
             src = src.to(device)
-            tgt = src[:,:-1]
-            src = src[:,1:]
+            tgt = src[:,1:]
+            src = src[:,:-1]
             batch_size, seqlen = tgt.shape[:2]
 
             logits = lm.forward(src)          
@@ -26,9 +25,10 @@ def perplexity(lm, corpus_gen, total, device=torch.device("cuda")):
     return ppl.item()
 
 def LM_perplex():
-    batch_size = 4
-    data_dir = "../data-fixed/"
-    preload = "GANLM/LM-check"
+    import sys
+    batch_size = 200
+    data_dir = "data-fixed/"
+    preload = sys.argv[1] #"trainedLM512-CE/LM-check"
     vocab = json.load(open(data_dir+"vocab.json", "r"))
     vocab_size = len(vocab)
 
@@ -38,7 +38,7 @@ def LM_perplex():
     
     pool = ["test", "valid"]
     for name in pool:
-        testing_set = PretrainDataset(data_dir+name+"_seq.json", 50, 50, vocab[EOS]) #train_seq
+        testing_set = PretrainDataset(data_dir+name+"_seq.json", 5, 50, vocab["<pad>"]) #train_seq
 
         testing_generator = Loader(testing_set, batch_size=batch_size, shuffle=False)
         total_test = int(math.ceil(testing_set.size / batch_size))

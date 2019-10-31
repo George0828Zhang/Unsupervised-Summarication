@@ -96,11 +96,7 @@ class FullTransformer(nn.Transformer):
 
 
         # use gumbel softmax instead
-
-        # ys = torch.ones(batch_size, 1).fill_(start_symbol).type_as(src)
-        # # (batch, 1)
-        # ys = torch.scatter_(dim=-1, index=ys.unsqueeze(0), value=1.) # one-hot
-
+        
         # one-hot
         ys = torch.zeros((1, batch_size, self.vocab_size)).type_as(memory)
         ys[...,start_symbol] = 1.
@@ -111,7 +107,7 @@ class FullTransformer(nn.Transformer):
         
         for i in range(max_len):
             tgt_mask = self.generate_square_subsequent_mask(i+1).type_as(src_mask)            
-            cxt = self.embed(ys) 
+            cxt = self.embed(ys.detach()) 
             # (i+1, batch, emb)
             out = self.decoder(cxt, memory, tgt_mask=tgt_mask, memory_key_padding_mask=src_mask)
             # (i+1, batch, emb)
@@ -128,5 +124,33 @@ class FullTransformer(nn.Transformer):
             ys = ys.argmax(dim=-1)
         return ys.transpose(0, 1)
 
-        # gumbel_softmax(logits, tau=1, hard=False, eps=1e-10, dim=-1)
 
+
+class LabelSmoothingLoss(nn.Module):
+    """
+    With label smoothing,
+    KL-divergence between q_{smoothed ground truth prob.}(w)
+    and p_{prob. computed by model}(w) is minimized.
+    """
+    def __init__(self, label_smoothing, tgt_vocab_size, ignore_index=-100, reduction="none"):
+        assert 0.0 < label_smoothing <= 1.0
+        self.ignore_index = ignore_index
+        super().__init__()
+
+        smoothing_value = label_smoothing / (tgt_vocab_size - 2)
+        one_hot = torch.full((tgt_vocab_size,), smoothing_value)
+        one_hot[self.ignore_index] = 0
+        self.register_buffer('one_hot', one_hot.unsqueeze(0))
+
+        self.confidence = 1.0 - label_smoothing
+        self.kl_div = nn.KLDivLoss(reduction=reduction)
+
+    def forward(self, output, target):
+        """
+        output (FloatTensor): batch_size x n_classes
+        target (LongTensor): batch_size
+        """
+        model_prob = self.one_hot.repeat(target.size(0), 1)
+        model_prob.scatter_(1, target.unsqueeze(1), self.confidence)
+        model_prob.masked_fill_((target == self.ignore_index).unsqueeze(1), 0)
+        return self.kl_div(output, model_prob)
