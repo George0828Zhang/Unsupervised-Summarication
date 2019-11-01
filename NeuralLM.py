@@ -83,7 +83,7 @@ class LanguageModel(nn.Module):
 
         return F.log_softmax(proj, dim=-1)
     
-    def inference(self, sent, start_index, return_prob=False):
+    def inference(self, sent, start_index, ignore_index=-100, return_prob=False):
         # (batch, len)
         batch_size, seqlen = sent.shape[:2]
         src = torch.ones(batch_size, 1).fill_(start_index).type_as(sent.data)
@@ -92,7 +92,8 @@ class LanguageModel(nn.Module):
         
         logits = self.forward(src) # (1, len, vocab)
             
-        CE = F.cross_entropy(logits.view(-1, self.vocab_size), tgt.view(-1), reduction='none').view(batch_size, seqlen)
+        CE = F.cross_entropy(logits.view(-1, self.vocab_size), tgt.view(-1), 
+            ignore_index=ignore_index, reduction='none').view(batch_size, seqlen)
         if not return_prob:
             return CE
         else:

@@ -6,7 +6,7 @@ import random
 from tqdm.auto import tqdm, trange
 
 class Dataset(data.Dataset):    
-    def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None):
+    def __init__(self, data_name, INPUT_MAX, OUTPUT_MAX, pad_idx, cutoff=None, unpaired=False):
         print("loading json")
         data = json.load(open(data_name, 'r'))
         print("load json done.")
@@ -32,7 +32,11 @@ class Dataset(data.Dataset):
                     
         idx = np.argsort([len(x) for x in self.src])[::-1] # descending
         
-        self.src = [ self.src[i] for i in idx]
+        self.src = [ self.src[i] for i in idx]        
+        
+        if unpaired:
+            idx = np.argsort([len(x) for x in self.tgt])[::-1] # descending
+
         self.tgt = [ self.tgt[i] for i in idx]
         
       

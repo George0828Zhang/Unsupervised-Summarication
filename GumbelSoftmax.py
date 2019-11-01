@@ -15,27 +15,28 @@ from pytransformer import FullTransformer
 from pointergenerator import PointerGenerator
 from NeuralLM import LanguageModel
 from dataset import *
-BOS = "<S>"
-EOS = "</S>"
-UNK = "<unk>"
-PAD = "<pad>"
+# BOS = "<S>"
+# EOS = "</S>"
+# UNK = "<unk>"
+# PAD = "<pad>"
+BOS = "<|endoftext|>"
+EOS = "<|endoftext|>"
+UNK = "<|endoftext|>"
+PAD = "<|endoftext|>"
 
 use_wandb = True
 device = torch.device("cuda")
 
-data_dir = "data-fixed/"
+data_dir = "data-giga-gpt2/"
 train_path = data_dir + "train_seq.json"
 valid_path = data_dir + "valid_seq.json"
 vocab_path = data_dir + "vocab.json"
-# embed_path = data_dir + "embeddings.npy"
-# lm_path = data_dir + "trainedLM13"
-# elmo_path = data_dir + "pretrain_ELMo"
-preload = "trained/PG-e2" #data_dir + "Pretrain114999"
-preload_LM = "trainedLM512-CE/LM-check"
-# cached_map = data_dir + "candidate_map"
+
+preload = None #"trained/PG-e2"
+preload_LM = None #"trainedLM512-CE/LM-check"
 
 
-start = 3
+start = 1
 epochs = 20
 
 
@@ -45,13 +46,13 @@ INPUT_LEN = 50
 OUTPUT_LEN = 20
 
 
-training_set = Dataset(train_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD]) #train_seq
-validation_set = Dataset(valid_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD])
+training_set = Dataset(train_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD], unpaired=True) #train_seq
+validation_set = Dataset(valid_path, INPUT_LEN, OUTPUT_LEN, vocab[PAD], unpaired=True)
 
 
-batch_size = 64
+batch_size = 32
 batch_size_inf = batch_size
-training_generator = Loader(training_set, batch_size=batch_size, shuffle=False)
+training_generator = Loader(training_set, batch_size=batch_size, shuffle=True)
 validation_generator = Loader(validation_set, batch_size=batch_size_inf, shuffle=False)
 total_train = int(math.ceil(training_set.size / batch_size))
 total_valid = int(math.ceil(validation_set.size / batch_size_inf))
@@ -63,7 +64,7 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 #     dim_feedforward=512, dropout=0.1, activation='relu')
 translator = PointerGenerator(vocab_size=VOCAB_SIZE, d_model=256, d_emb=256, nhead=8, num_layers=2, dropout=0.1, coverage=True)
 discriminator1 = LanguageModel(vocab, emb_dim=512, hidden_dim=512, dropout=0.4, emb_share=True, use_position=True)
-evaluator = LanguageModel(vocab, emb_dim=512, hidden_dim=512, dropout=0.4, emb_share=True, use_position=True)
+# evaluator = LanguageModel(vocab, emb_dim=512, hidden_dim=512, dropout=0.4, emb_share=True, use_position=True)
 # remember to initialize
 
 # preload
@@ -74,20 +75,20 @@ if preload != None:
 if preload_LM != None:
     tmp = torch.load(preload_LM, map_location=lambda s,l: s)
     discriminator1.load_state_dict(tmp.state_dict())
-    evaluator.load_state_dict(tmp.state_dict())
+    # evaluator.load_state_dict(tmp.state_dict())
     del tmp
 
 # send to device
 translator.to(device)
 discriminator1.to(device)
-evaluator.to(device)
-evaluator.eval()
+# evaluator.to(device)
+# evaluator.eval()
 
 eps = 1e-10
-learning_rate = {'G':1e-4, 'D':1e-6}
+learning_rate = {'G':1e-4, 'D':1e-4}
 weight_decay = {'G':1e-6, 'D':1e-4}
-# learning_rate = {'G':1e-4, 'D':1e-5}
-# weight_decay = {'G':1e-6, 'D':5e-5}
+# learning_rate = {'G':1e-4, 'D':1e-6}
+# weight_decay = {'G':1e-6, 'D':1e-4}
 optimizer_G = torch.optim.RMSprop(translator.parameters(), lr=learning_rate['G'], weight_decay=weight_decay['G'])
 optimizer_D = torch.optim.RMSprop(discriminator1.parameters(), lr=learning_rate['D'], weight_decay=weight_decay['D'])
 
@@ -113,10 +114,10 @@ def train_D(src, tgt, gumbel_tau, N=1, update=True):
             ys, _ = translator(src, src_mask=src_mask, max_len=tgt.size(1), 
                 start_symbol=vocab[BOS], gumbel_tau=gumbel_tau, return_index=True, keep_bos=False)
 
-        fake_loss = discriminator1.inference(ys, start_index=vocab[BOS], return_prob=False).mean()
-        real_loss = discriminator1.inference(tgt[:,1:], start_index=vocab[BOS], return_prob=False).mean()
+        fake_loss = discriminator1.inference(ys, start_index=vocab[BOS], ignore_index=vocab[PAD], return_prob=False).mean()
+        real_loss = discriminator1.inference(tgt[:,1:], start_index=vocab[BOS], ignore_index=vocab[PAD], return_prob=False).mean()
 
-        dloss = (real_loss - fake_loss)
+        dloss = (real_loss - fake_loss)/N
         dloss.backward()
 
         fake_loss_avg.append(fake_loss.item())
@@ -128,37 +129,31 @@ def train_D(src, tgt, gumbel_tau, N=1, update=True):
 
     return np.mean(fake_loss_avg), np.mean(real_loss_avg)
 
-# def CatXEnt(pred, target):
-#     return -(target * torch.log(pred)).sum(dim=1).mean()
-
 def train_G(src, max_len, gumbel_tau, N=1, update=True):
     translator.train()
     discriminator1.train()
 
-    src_mask = (src == vocab[PAD]) 
-    ys_hot, covloss = translator(src, src_mask=src_mask, max_len=max_len, 
-            start_symbol=vocab[BOS], gumbel_tau=gumbel_tau, return_index=False, keep_bos=True)
+    for _ in range(N):
+        src_mask = (src == vocab[PAD]) 
+        ys_hot, covloss = translator(src, src_mask=src_mask, max_len=max_len, 
+                start_symbol=vocab[BOS], gumbel_tau=gumbel_tau, return_index=False, keep_bos=True)
 
-    log_p_LM = discriminator1(ys_hot)#.detach()
-    
-    # (batch, len, vocab)
-    # xent = (-ys_hot*log_p_LM).sum(-1)
-    b,s,v = ys_hot.shape
-    ys_hot = ys_hot.contiguous()
-    xent = -torch.matmul(ys_hot.view(b*s, 1, v), log_p_LM.view(b*s, v, 1)) # (b*s, 1)
-    xent = xent.view(b, s)
+        # use 0:-1
+        lm_input = ys_hot[:,:-1]
+        log_p_LM = discriminator1(lm_input)
+        # gets 1:end
 
-    # ys_hot = translator(src, src_mask=src_mask, max_len=max_len, 
-    #         start_symbol=vocab[BOS], gumbel_tau=gumbel_tau, return_index=False, keep_bos=False)
-    # b,s,v = ys_hot.shape
-    # ys_hot = ys_hot.contiguous()
-    # log_p = torch.log(ys_hot+eps)
-    # xent = F.nll_loss(log_p.view(b*s, v), tgt.view(b*s), reduction='none').view(b, s)
+        # (batch, len, vocab)
+        # use 1:end
+        xent_input = ys_hot[:,1:].contiguous()
+        b,s,v = xent_input.shape
+        xent = -torch.matmul(xent_input.view(b*s, 1, v), log_p_LM.view(b*s, v, 1)) # (b*s, 1)
+        xent = xent.view(b, s)
 
-    # (batch, len)
-    gloss = xent.mean() + covloss
 
-    gloss.backward()
+        # (batch, len)
+        gloss = (xent.mean() + covloss)/N
+        gloss.backward()
 
     if update:
         optimizer_G.step()
@@ -183,10 +178,14 @@ if use_wandb:
         })
     # wandb.watch([translator, matcher])
 
-vocab_inv = {a:b for b,a in vocab.items()}
+# vocab_inv = {a:b for b,a in vocab.items()}
+# def id2sent(ids):
+#     toks = (vocab_inv[i] for i in ids)
+#     return " ".join(toks)
+from transformers import GPT2Tokenizer
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 def id2sent(ids):
-    toks = (vocab_inv[i] for i in ids)
-    return " ".join(toks)
+    return tokenizer.decode(ids)
 def tstring(reward):
     return ", ".join([format(f, ".5g") for f in reward.cpu().numpy()])
 
@@ -202,11 +201,10 @@ for e in range(start, epochs+1):
         tgt = tgt.to(device)
 
         fake_loss, real_loss = train_D(src, tgt, gumbel_tau, N=5, update=True)
-        g_loss, cov_loss, XEnt, ys = train_G(src, tgt.size(1), gumbel_tau, N=1, update=True)
+        g_loss, cov_loss, XEnt, ys = train_G(src, tgt.size(1), gumbel_tau, N=2, update=True)
         
-        # log_perplex = XEnt.mean().item()
-
-        XEnt, ppx = perplex(ys[0:], log=True)
+        ppx = XEnt.mean().item()
+        # XEnt, ppx = perplex(ys[0:], log=True)
 
         fake_loss = g_loss
         ### logging
