@@ -142,8 +142,8 @@ class GPT2Preprocessor(Preprocessor):
         self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 
     def process(self, vocab=None):        
-        self.summ_seqs = [self.tokenizer.encode(s) for s in tqdm(self.summaries)]
-        self.docu_seqs = [self.tokenizer.encode(s) for s in tqdm(self.documents)]
+        self.summ_seqs = [self.tokenizer.encode(s, add_prefix_space=True) for s in tqdm(self.summaries)]
+        self.docu_seqs = [self.tokenizer.encode(s, add_prefix_space=True) for s in tqdm(self.documents)]
 
     def export(self, vocab_name=None, data_seq_name="tmp.json", valid_seq_name=None):
         if vocab_name is not None:
@@ -178,9 +178,9 @@ class GPT2Preprocessor(Preprocessor):
 
 
 def main():
-    task_name = "giga"
+    task_name = "wiki103"
     task_type = "train"
-    out_dir = "data-giga-gpt2/"#"data-{}/".format(task_name)
+    out_dir = "data-wiki-gpt2/"#"data-{}/".format(task_name)
     num_threads = 4
     validation_split = 0.005 if task_type == "train" else 0
 
@@ -191,10 +191,10 @@ def main():
             doc_name = "/home/george/Projects/Datasets/giga/test.article.txt"
             summ_name = "/home/george/Projects/Datasets/giga/test.title.txt"
     elif task_name == "wiki103":
-        doc_name = "/home/george/Projects/Datasets/wikitext-103/wiki.train.tokens.2"
+        doc_name = "/tmp2/b05902064/wikitext-103/wiki.train.tokens.2"
         summ_name = ""
         if task_type == "eval":
-            doc_name = "/home/george/Projects/Datasets/wikitext-103/wiki.test.tokens.2"
+            doc_name = "/tmp2/b05902064/wikitext-103/wiki.valid.tokens.2"
         validation_split = 0
     else:
         doc_name = "../pointer-generator/data2/train.txt.src"
