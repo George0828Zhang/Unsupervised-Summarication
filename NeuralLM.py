@@ -80,8 +80,7 @@ class LanguageModel(nn.Module):
         out, (h, c) = self.lstm(emb)
 
         proj = self.project(out)
-
-        return F.log_softmax(proj, dim=-1)
+        return proj #F.log_softmax(proj, dim=-1)
     
     def inference(self, sent, start_index, ignore_index=-100, return_prob=False):
         # (batch, len)
@@ -94,6 +93,7 @@ class LanguageModel(nn.Module):
             
         CE = F.cross_entropy(logits.view(-1, self.vocab_size), tgt.view(-1), 
             ignore_index=ignore_index, reduction='none').view(batch_size, seqlen)
+
         if not return_prob:
             return CE
         else:
@@ -103,25 +103,28 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 class GPT2LM(nn.Module):
     def __init__(self):
         super().__init__()
-        self.gpt2 = GPT2LMHeadModel.from_pretrained('gpt2')
+        self.gpt2 = GPT2LMHeadModel.from_pretrained('distilgpt2')
         self.vocab_size = self.gpt2.config.vocab_size
 
     def forward(self, word_ids):
-        return self.gpt2(word_ids)
+        logits, past = self.gpt2(word_ids)
+        return logits #F.log_softmax(logits, dim=-1)
 
-    def inference(self, sent, start_index, return_prob=False):
+    def inference(self, sent, start_index, ignore_index=-100, return_prob=False):
         # (batch, len)
         batch_size, seqlen = sent.shape[:2]
         src = torch.ones(batch_size, 1).fill_(start_index).type_as(sent.data)
         src = torch.cat((src, sent[:,:-1]), 1)
         tgt = sent.contiguous()
       
-        logits, past = self.forward(src) # (1, len, vocab)
-           
-        CE = F.cross_entropy(logits.view(-1, self.vocab_size), tgt.view(-1), reduction='none').view(batch_size, seqlen)
+        logits = self.forward(src) # (1, len, vocab)
+                   
+        CE = F.cross_entropy(logits.view(-1, self.vocab_size), tgt.view(-1), 
+            ignore_index=ignore_index, reduction='none').view(batch_size, seqlen)
+
         if not return_prob:
             return CE
-        else
+        else:
             return (-CE).exp()
 
 

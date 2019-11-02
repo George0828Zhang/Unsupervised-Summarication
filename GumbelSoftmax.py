@@ -13,7 +13,7 @@ import torch.nn.functional as F
 # from architecture import *
 from pytransformer import FullTransformer
 from pointergenerator import PointerGenerator
-from NeuralLM import LanguageModel
+from NeuralLM import LanguageModel, GPT2LM
 from dataset import *
 # BOS = "<S>"
 # EOS = "</S>"
@@ -27,12 +27,12 @@ PAD = "<|endoftext|>"
 use_wandb = True
 device = torch.device("cuda")
 
-data_dir = "data-giga-gpt2/"
+data_dir = "data-giga-gpt2-eos/"
 train_path = data_dir + "train_seq.json"
 valid_path = data_dir + "valid_seq.json"
 vocab_path = data_dir + "vocab.json"
 
-preload = None #"trained/PG-e2"
+preload = None #"trained/PG-check"
 preload_LM = None #"trainedLM512-CE/LM-check"
 
 
@@ -63,7 +63,8 @@ total_valid = int(math.ceil(validation_set.size / batch_size_inf))
 #     num_encoder_layers=2, num_decoder_layers=2, 
 #     dim_feedforward=512, dropout=0.1, activation='relu')
 translator = PointerGenerator(vocab_size=VOCAB_SIZE, d_model=256, d_emb=256, nhead=8, num_layers=2, dropout=0.1, coverage=True)
-discriminator1 = LanguageModel(vocab, emb_dim=512, hidden_dim=512, dropout=0.4, emb_share=True, use_position=True)
+# discriminator1 = LanguageModel(vocab, emb_dim=512, hidden_dim=512, dropout=0.4, emb_share=True, use_position=True)
+discriminator1 = GPT2LM()
 # evaluator = LanguageModel(vocab, emb_dim=512, hidden_dim=512, dropout=0.4, emb_share=True, use_position=True)
 # remember to initialize
 
@@ -138,10 +139,12 @@ def train_G(src, max_len, gumbel_tau, N=1, update=True):
         ys_hot, covloss = translator(src, src_mask=src_mask, max_len=max_len, 
                 start_symbol=vocab[BOS], gumbel_tau=gumbel_tau, return_index=False, keep_bos=True)
 
-        # use 0:-1
-        lm_input = ys_hot[:,:-1]
-        log_p_LM = discriminator1(lm_input)
-        # gets 1:end
+        with torch.no_grad():
+            # use 0:-1
+            lm_input = ys_hot[:,:-1].argmax(dim=-1)
+            lm_logits = discriminator1(lm_input)
+            log_p_LM = F.log_softmax(lm_logits, dim=-1)
+            # gets 1:end
 
         # (batch, len, vocab)
         # use 1:end
@@ -183,7 +186,7 @@ if use_wandb:
 #     toks = (vocab_inv[i] for i in ids)
 #     return " ".join(toks)
 from transformers import GPT2Tokenizer
-tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+tokenizer = GPT2Tokenizer.from_pretrained("distilgpt2")
 def id2sent(ids):
     return tokenizer.decode(ids)
 def tstring(reward):
