@@ -140,10 +140,16 @@ class GPT2Preprocessor(Preprocessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-
-    def process(self, vocab=None):        
+        self.EOSid = self.tokenizer.convert_tokens_to_ids('<|endoftext|>')
+    
+    def process(self, vocab=None, add_EOS=False):        
+        
         self.summ_seqs = [self.tokenizer.encode(s, add_prefix_space=True) for s in tqdm(self.summaries)]
         self.docu_seqs = [self.tokenizer.encode(s, add_prefix_space=True) for s in tqdm(self.documents)]
+        
+        if add_EOS:
+            self.summ_seqs = [[self.EOSid] + s + [self.EOSid] for s in self.summ_seqs]
+            self.docu_seqs = [[self.EOSid] + s + [self.EOSid] for s in self.docu_seqs]
 
     def export(self, vocab_name=None, data_seq_name="tmp.json", valid_seq_name=None):
         if vocab_name is not None:
@@ -178,15 +184,16 @@ class GPT2Preprocessor(Preprocessor):
 
 
 def main():
-    task_name = "wiki103"
+    task_name = "giga"
     task_type = "train"
-    out_dir = "data-wiki-gpt2/"#"data-{}/".format(task_name)
+    out_dir = "/hdd/data-giga-gpt2-withEOF/"#"data-{}/".format(task_name)
     num_threads = 4
     validation_split = 0.005 if task_type == "train" else 0
+    add_EOS = True
 
     if task_name == "giga":
-        doc_name = "/home/george/Projects/Datasets/giga/train.article.txt"
-        summ_name = "/home/george/Projects/Datasets/giga/train.title.txt"
+        doc_name = "/hdd/giga/train.article.txt"
+        summ_name = "/hdd/giga/train.title.txt"
         if task_type == "eval":
             doc_name = "/home/george/Projects/Datasets/giga/test.article.txt"
             summ_name = "/home/george/Projects/Datasets/giga/test.title.txt"
@@ -216,9 +223,9 @@ def main():
     p = GPT2Preprocessor(doc_name, summ_name, validation_split, 20000, token_mappings, num_threads)
     if task_type == "eval" and not isinstance(p, GPT2Preprocessor):
         vocab = json.load(open(vocab_name, "r"))
-        p.process(vocab=vocab)
+        p.process(vocab=vocab, add_EOS = add_EOS)
     else:
-        p.process()
+        p.process(add_EOS = add_EOS)
 
     os.makedirs(out_dir,exist_ok=True)
     p.export(vocab_name,data_seq_name,valid_seq_name)
