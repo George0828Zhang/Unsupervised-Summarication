@@ -57,15 +57,16 @@ class Dataset(data.Dataset):
 
 from collections import deque
 class PretrainDataset(data.Dataset):    
-    def __init__(self, data_name, OUTPUT_MIN, OUTPUT_MAX, pad_idx, cutoff=None):
+    def __init__(self, data_name, OUTPUT_MIN, OUTPUT_MAX, pad_idx, use_summary=False, cutoff=None):
         print("loading json")
         data = json.load(open(data_name, 'r'))
         print("load json done.")
+        data_list = data['summary' if use_summary else 'document']
         
         self.src = []
-        self.size = len(data['document']) if cutoff==None else cutoff
+        self.size = len(data_list) if cutoff==None else cutoff
 
-        for d in tqdm(data['document'][:cutoff], total=self.size):
+        for d in tqdm(data_list[:cutoff], total=self.size):
             # if OUTPUT_MIN <= len(d) <= OUTPUT_MAX:
             #     self.src.append(d)            
             chunks = len(d) // (OUTPUT_MAX+1) + 1
