@@ -17,7 +17,7 @@ from multiprocessing import Pool
 
 # from dataset import Dataset
 import dataset
-from Model import Solver, GPT2LM, PointerGenerator
+from Model import *
 
 
 def main():
@@ -51,6 +51,9 @@ def main():
     # prepro args
     parser.add_argument("--cutoff", default=100000000, type=int,
                         help="Cutoff for training examples. Default 1e8.")
+    parser.add_argument("--min_byte_length", default=75, type=int,
+                        help="The minimum total input sequence length in bytes before tokenization."
+                        "Sequences shorter will be discard.")
 
     # train args
     parser.add_argument("--shuffle", action='store_true',
@@ -58,10 +61,14 @@ def main():
     parser.add_argument("--batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for training.")
 
-    parser.add_argument("--learning_rate", default=5e-5, type=float,
-                        help="The initial learning rate for Adam.")
-    parser.add_argument("--weight_decay", default=0.0, type=float,
-                        help="Weight deay if we apply some.")
+    parser.add_argument("--learning_rate_D", default=5e-5, type=float,
+                        help="The initial learning rate for Optimizer D.")
+    parser.add_argument("--weight_decay_D", default=0.0, type=float,
+                        help="Weight deay if we apply some. Optimizer D.")
+    parser.add_argument("--learning_rate_G", default=5e-5, type=float,
+                        help="The initial learning rate for Optimizer G.")
+    parser.add_argument("--weight_decay_G", default=0.0, type=float,
+                        help="Weight deay if we apply some. Optimizer G.")
     # parser.add_argument("--adam_epsilon", default=1e-8, type=float,
     #                     help="Epsilon for Adam optimizer.")
     # parser.add_argument("--max_grad_norm", default=1.0, type=float,
@@ -70,10 +77,13 @@ def main():
                         help="Total number of training epochs to perform.")
     parser.add_argument("--start_epoch", default=1, type=int,
                         help="Starting epoch.")
+    parser.add_argument("--steps_per_save", default=20000, type=int,
+                        help="How often to save a checkpoint. Default is 20000 steps")
+    parser.add_argument("--stage", default=1, type=int,
+                        help="Starting stage. Stage 1 uses GPT2 to smoothen seq2seq output,"
+                        " while stage 2 uses next sentence to enforce information bottleneck.")
 
-    parser.add_argument("--min_byte_length", default=75, type=int,
-                        help="The minimum total input sequence length in bytes before tokenization."
-                        "Sequences shorter will be discard.")
+    
 
     parser.add_argument("--max_seq_length", default=128, type=int,
                         help="The maximum total input sequence length after tokenization. Sequences longer "
@@ -81,8 +91,11 @@ def main():
     parser.add_argument("--summ_length", default=20, type=int,
                         help="The maximum total generated summary sequence length.")
 
+    # model specific
     parser.add_argument("--group_by_nxt", action='store_true',
                         help="Whether to group training sequence based on next sentence (nxt). Default is group by source (src).")
+    parser.add_argument("--use_custom_loss", action='store_true',
+                        help="Whether to use the KL_div loss we proposed, instead of cross entropy.")
     args = parser.parse_args()
     
     if args.do_train:
@@ -107,9 +120,14 @@ def main():
     #         input("next?")
     #########
     
+    
     discriminator = GPT2LM(preload='distilgpt2')
-    translator = PointerGenerator(vocab_size=discriminator.vocab_size, 
-        d_model=256, d_emb=256, num_layers=2, dropout=0.1, coverage=True)
+    # translator = PointerGenerator(vocab_size=discriminator.vocab_size, 
+    #     d_model=256, d_emb=256, num_layers=2, dropout=0.1, coverage=True)
+    translator = GPT2Summarizer(preload='distilgpt2')
+
+    # share encoder
+    translator.gpt2.transformer = discriminator.gpt2.transformer
     
 
     solver = Solver(args, tokenizer=tokenizer, 
@@ -118,7 +136,7 @@ def main():
         dataset=data_set, data_generator=data_generator,
         optim=torch.optim.RMSprop,
         )
-    solver.solve(start=args.start_epoch, epochs=args.num_train_epochs)
+    solver.solve(start=args.start_epoch, epochs=args.num_train_epochs, stage=args.stage)
 
 
 def load_and_cache_examples(args, tokenizer, phase="train"):    

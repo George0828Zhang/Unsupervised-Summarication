@@ -9,9 +9,10 @@ from tqdm.auto import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import GPT2LMHeadModel
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 
+import wandb
 
 def _one_hot(y, n_dims):
     y_hot = torch.zeros(*y.shape, n_dims).view(-1, n_dims).type_as(y)
@@ -19,17 +20,35 @@ def _one_hot(y, n_dims):
     y_hot = y_hot.view(*y.shape, -1)
     return y_hot
 
+def tensor_replace(x, fr, to):
+    out = x.clone()
+    out[x==fr] = to
+    return out
+
 class Solver:
     def __init__(self, args, tokenizer, translator, discriminator, dataset, data_generator,
-        optim=torch.optim.RMSprop, 
-        ):  
+        optim=torch.optim.RMSprop, ):  
         # Params
         self.use_wandb = args.use_wandb
         self.batch_size = args.batch_size
         self.gumbel_tau = 1.
-        self.summ_len = args.summ_length
+        self.summ_length = args.summ_length
+        self.step = 0
+        self.use_custom_loss = args.use_custom_loss
+
+        if self.use_wandb:
+            wandb_resume = False
+            wandb.init(project="information-bottleneck-gumbelsoftmax", resume=wandb_resume)
+            wandb.config.update({
+                "batch size": args.batch_size,
+                "input len":args.max_seq_length,
+                "summary len":args.summ_length,       
+                "weight decay": {"D":args.weight_decay_D, "G":args.weight_decay_G},
+                "learning rate": {"D":args.learning_rate_D, "G":args.learning_rate_G}
+                })
         
         # Others
+        self.steps_per_save = args.steps_per_save
         self.device = torch.device("cpu" if args.no_cuda else "cuda")
         self.tokenizer = tokenizer
         self.vocab_size = tokenizer.vocab_size
@@ -48,36 +67,28 @@ class Solver:
         logging.info("Done.")
         
         # Optims
-        self.optimizer_G = optim(translator.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+        # self.optimizer_G = optim(self.translator.parameters(), lr=args.learning_rate_G, weight_decay=args.weight_decay_G)
+        # self.optimizer_D = optim(self.discriminator.parameters(), lr=args.learning_rate_D, weight_decay=args.weight_decay_D)
+
+        ### some hacks
+        self.optimizer_G = optim(self.translator.gpt2.lm_head.parameters(), lr=args.learning_rate_G, weight_decay=args.weight_decay_G)
+        self.optimizer_D = optim(self.discriminator.gpt2.lm_head.parameters(), lr=args.learning_rate_D, weight_decay=args.weight_decay_D)
                        
         # Data
         self.data_generator = data_generator
         self.total_train = int(math.ceil(dataset.size / self.batch_size))
 
 
-    def id2sent(self, ids):
+    def id2sent(self, ids, pad="<s>"):
         toks = self.tokenizer.decode(ids)
-        return toks.replace("<|endoftext|>", "")
+        return toks.replace("<|endoftext|>", pad)
 
     # def tstring(r):
     #     return ", ".join([format(f, ".5g") for f in r.cpu().numpy()])
 
-    def solve(self, start, epochs):
+    def solve(self, start, epochs, stage=1):
         logging.info("Start training from epoch {}. Total {} epochs.".format(start, epochs))
-
-        if self.use_wandb:
-            import wandb
-            wandb_resume = False
-            wandb.init(project="information-bottleneck-gumbelsoftmax", resume=wandb_resume)
-            wandb.config.update({
-                "batch size": self.batch_size,
-                "input len":self.max_seq_length,
-                "summary len":self.summ_length,       
-                "weight decay": args.weight_decay,
-                "learning rate": args.learning_rate
-                })
-
-
+        self.step = 0
         for e in range(start, epochs+1):
             self.gumbel_tau = max(1e-3, 2**(1-start))
             bigbar = tqdm(self.data_generator, total=self.total_train, 
@@ -87,10 +98,13 @@ class Solver:
                 src = src.to(self.device)
                 nxt = nxt.to(self.device)
 
-                g_loss, cov_loss, ys = self.train_G(src=src, nxt=nxt, max_len=self.summ_len, N=1, update=True)
+                d_loss = self.train_D(src=src, nxt=nxt, N=1, update=True)
+                g_loss, ys = self.train_G(src=src, nxt=nxt, max_len=self.summ_length, 
+                    N=1, update=True, stage=stage, custom_loss=self.use_custom_loss)
                                 
                 ### logging
                 bigbar.set_postfix(
+                    d_loss=d_loss,
                     g_loss=g_loss,
                     # cov_loss=cov_loss,
                     )
@@ -99,8 +113,8 @@ class Solver:
                         "input":self.id2sent(src[0].cpu().numpy()),
                         "output":self.id2sent(ys[0].cpu().numpy()),
                         "next":self.id2sent(nxt[0].cpu().numpy()),
+                        "d_loss":d_loss,
                         "g_loss":g_loss,
-                        "cov loss":cov_loss,
                               }
                 if self.use_wandb: 
                     wandb.log(info)
@@ -110,6 +124,10 @@ class Solver:
 
                 if i % 5000 == 4999:
                     self.checkpoint()
+
+                self.step += 1
+                if (self.step + 1) % self.steps_per_save == 0:
+                    self.checkpoint(step=self.step)
                     
             self.checkpoint(epoch=e)
 
@@ -129,48 +147,89 @@ class Solver:
         logging.info("Saving complete.")
 
 
-    def train_G(self, src, nxt, max_len, N=1, update=True):
+    def train_G(self, src, nxt, max_len, N=1, update=True, stage=1, custom_loss=True):
 
         self.translator.train()
         self.discriminator.train()
 
         for _ in range(N):
-            src_mask = (src == self.PAD_id) 
-            ys_hot, covloss = self.translator(src, src_mask=src_mask, max_len=max_len, 
-                    start_symbol=self.PAD_id, gumbel_tau=self.gumbel_tau, return_index=False, keep_bos=True)
+            src_mask = (src != self.PAD_id) #not used in PG
+            # ys_hot, covloss = self.translator(src, src_mask=src_mask, max_len=max_len, 
+            #         start_symbol=self.PAD_id, gumbel_tau=self.gumbel_tau, return_index=False, keep_bos=False)
 
+            ys_hot = self.translator(src, src_mask=src_mask, max_len=max_len, 
+                    start_symbol=self.PAD_id, gumbel_tau=self.gumbel_tau, return_index=False, keep_bos=False)
 
-            # concat with nxt
-            nxt_hot = _one_hot(nxt, self.vocab_size).type_as(ys_hot)
-            ys_nxt_hot = torch.cat((ys_hot, nxt_hot), dim=1)
-            
-            # use 0:-1
-            lm_input = ys_nxt_hot[:,:-1] #.argmax(dim=-1)
-            lm_logits = self.discriminator(lm_input)
-            log_p_LM = F.log_softmax(lm_logits, dim=-1)
-            # gets 1:end
-            
+            if stage == 2:
+                # concat with nxt
+                nxt_hot = _one_hot(nxt, self.vocab_size).type_as(ys_hot)
+                ys_nxt_hot = torch.cat((ys_hot, nxt_hot), dim=1)
 
-            # use 1:end
-            xent_input = ys_nxt_hot[:,1:].contiguous()
-            b,s,v = xent_input.shape
-            xent = F.kl_div(log_p_LM.view(b*s, v), xent_input.view(b*s, v), reduction="batchmean") # (b, s)
+                
+                lm_input = ys_nxt_hot[:,:-1]
+                xent_input = ys_nxt_hot[:,1:].contiguous()
+            else:
+                # use 0:-1
+                lm_input = ys_hot[:,:-1]
+                # use 1:end
+                xent_input = ys_hot[:,1:].contiguous()
 
-            gloss = xent + covloss
+            # calculate mask
+            lm_index = lm_input.argmax(dim=-1)          
+            attn_mask = (lm_index != self.PAD_id)
+            ys = lm_index[:,:max_len]
+            """attention_mask: (optional) torch.FloatTensor of shape (batch_size, sequence_length):
+            Mask to avoid performing attention on padding token indices. Mask values selected in [0, 1]: 1 for tokens that are NOT MASKED, 0 for MASKED tokens.
+            """
+            if custom_loss:
+                lm_logits = self.discriminator(lm_input, attention_mask=attn_mask)
+                log_p_LM = F.log_softmax(lm_logits, dim=-1)
+                # gets 1:end
+
+                b,s,v = xent_input.shape
+                xent = F.kl_div(log_p_LM.view(b*s, v), xent_input.view(b*s, v), reduction="mean") # (b, s)
+                xent[lm_index==self.PAD_id] = 0
+                xent = xent.mean()# reduction
+            else:
+                lm_index = tensor_replace(lm_index, self.PAD_id, -1)
+                xent, lm_logits = self.discriminator(lm_input, attention_mask=attn_mask, labels=lm_index)
+
+            gloss = xent #+ covloss
 
             gloss /= N
             gloss.backward()
-            # (batch, len)
-            #gloss = (xent.mean() + covloss)/N
-            #gloss.backward()
 
         if update:
             self.optimizer_G.step()
             self.optimizer_G.zero_grad()
-            if hasattr(self, "optimizer_D"):
-                self.optimizer_D.zero_grad() # clear gradient computed for G
+            # clear gradient computed for G but accumulated on D
+            # self.optimizer_D.zero_grad()
+            self.discriminator.zero_grad()
 
-        return gloss.item(), covloss.item(), ys_hot.argmax(dim=-1)
+
+
+        return gloss.item(), ys
+
+    def train_D(self, src, nxt, N=1, update=True):
+        
+        self.discriminator.train()
+
+        # concat with nxt
+        src_nxt = torch.cat((src, nxt), dim=1)
+        labels = tensor_replace(src_nxt, self.PAD_id, -1) # the xent in gpt2 ignores -1 as label
+
+        attn_mask = (src_nxt != self.PAD_id)
+        # real_loss = discriminator.inference(tgt[:,1:], start_index=vocab[BOS], ignore_index=vocab[PAD], return_prob=False).mean()
+        for _ in range(N):
+            real_loss, lm_logits = self.discriminator(src_nxt, attention_mask=attn_mask, labels=labels)
+            real_loss /= N
+            real_loss.backward()
+         
+        if update:
+            self.optimizer_D.step()
+            self.optimizer_D.zero_grad()
+        
+        return real_loss.item()
 
 
 
@@ -292,19 +351,57 @@ class PointerGenerator(nn.Module):
 class GPT2LM(nn.Module):
     def __init__(self, preload='distilgpt2'):
         super().__init__()
-        self.gpt2 = GPT2LMHeadModel.from_pretrained(preload)
+        if isinstance(preload, str):
+            self.gpt2 = GPT2LMHeadModel.from_pretrained(preload)
+        else:
+            self.gpt2 = preload
         self.vocab_size = self.gpt2.config.vocab_size
 
-    def forward(self, word_ids):
+    def forward(self, word_ids, *args, **kwargs):
         if word_ids.dim() < 2:
             raise RuntimeError("word_ids should be (batch, len) or (batch, len, vocab)")
         elif word_ids.dim() == 2:
-            logits, past = self.gpt2(word_ids)
+            outputs = self.gpt2(word_ids,*args, **kwargs)
         elif word_ids.dim() == 3:
             tok_emb = torch.matmul(word_ids, self.gpt2.transformer.wte.weight)
-            logits, past = self.gpt2(inputs_embeds=tok_emb)        
+            outputs = self.gpt2(inputs_embeds=tok_emb,*args, **kwargs)        
+        # outputs = (loss,) logits, past
+        if len(outputs)==2:
+            return outputs[0]
 
-        return logits
+        return outputs[:2]
+
+class GPT2Summarizer(nn.Module):
+    def __init__(self, preload='distilgpt2'):
+        super().__init__()
+        if isinstance(preload, str):
+            self.gpt2 = GPT2LMHeadModel.from_pretrained(preload)
+        else:
+            self.gpt2 = preload
+        self.vocab_size = self.gpt2.config.vocab_size
+
+        tokenizer = GPT2Tokenizer.from_pretrained(preload)
+        self.delimiter = torch.tensor(tokenizer.encode("TL;DR:")) # Size([4])
+
+    def forward(self, src, src_mask, max_len, start_symbol, gumbel_tau=1., return_index=False, keep_bos=False):
+        delim = self.delimiter.repeat((src.size(0),1)).type_as(src)
+        context = torch.cat((src, delim), dim=1) # batch, len
+
+        generated = []
+        past = None
+
+        for i in range(max_len):            
+            output, past = self.gpt2(context, past=past) # batch, len, vocab
+            
+            token_hot = F.gumbel_softmax(output[:,-1:,:], tau=gumbel_tau, hard=False, dim=-1) # (batch, 1, vocab)
+            token = token_hot.argmax(dim=-1)
+            context = token
+            
+            generated.append(token if return_index else token_hot)
+        
+
+        ys = torch.cat(generated, dim=1)
+        return ys
 
     # def inference(self, sent, start_index, ignore_index=-100, return_prob=False):
     #     # (batch, len)
