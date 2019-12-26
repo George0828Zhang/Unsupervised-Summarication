@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPT2Model, GPT2LMHeadModel, GPT2Tokenizer
 
 
 import wandb
@@ -26,8 +26,8 @@ def tensor_replace(x, fr, to):
     return out
 
 class Solver:
-    def __init__(self, args, tokenizer, translator, discriminator, dataset, data_generator,
-        optim=torch.optim.RMSprop, ):  
+    def __init__(self, args, tokenizer, summarizer, discriminator, data_generator,
+        optimizer_G, optimizer_D ):  
         # Params
         self.use_wandb = args.use_wandb
         self.batch_size = args.batch_size
@@ -52,7 +52,7 @@ class Solver:
         self.device = torch.device("cpu" if args.no_cuda else "cuda")
         self.tokenizer = tokenizer
         self.vocab_size = tokenizer.vocab_size
-        self.PAD_id = tokenizer.PAD_id
+        self.pad_token_id = tokenizer.pad_token_id
         self.out_dir = args.output_dir
 
         if not os.path.isdir(self.out_dir):
@@ -60,23 +60,22 @@ class Solver:
             os.makedirs(self.out_dir, exist_ok=True)
 
         # Models
-        logging.info("Sending translator to device...")
-        self.translator = translator.to(self.device)
-        logging.info("Sending discriminator to device...")
-        self.discriminator = discriminator.to(self.device)
-        logging.info("Done.")
+        if summarizer is not None:
+            logging.info("Sending summarizer to device...")
+            self.summarizer = summarizer.to(self.device)
+        if discriminator is not None:
+            logging.info("Sending discriminator to device...")
+            self.discriminator = discriminator.to(self.device)
+        
         
         # Optims
-        # self.optimizer_G = optim(self.translator.parameters(), lr=args.learning_rate_G, weight_decay=args.weight_decay_G)
-        # self.optimizer_D = optim(self.discriminator.parameters(), lr=args.learning_rate_D, weight_decay=args.weight_decay_D)
+        self.optimizer_G = optimizer_G
+        self.optimizer_D = optimizer_D
 
-        ### some hacks
-        self.optimizer_G = optim(self.translator.gpt2.lm_head.parameters(), lr=args.learning_rate_G, weight_decay=args.weight_decay_G)
-        self.optimizer_D = optim(self.discriminator.gpt2.lm_head.parameters(), lr=args.learning_rate_D, weight_decay=args.weight_decay_D)
-                       
         # Data
         self.data_generator = data_generator
-        self.total_train = int(math.ceil(dataset.size / self.batch_size))
+
+        logging.info("Solver init done.")
 
 
     def id2sent(self, ids, pad="<s>"):
@@ -91,7 +90,7 @@ class Solver:
         self.step = 0
         for e in range(start, epochs+1):
             self.gumbel_tau = max(1e-3, 2**(1-start))
-            bigbar = tqdm(self.data_generator, total=self.total_train, 
+            bigbar = tqdm(self.data_generator, total=self.data_generator.total, 
                 desc="[epoch] {}, tau=".format(e, self.gumbel_tau))
             
             for i, (src, nxt) in enumerate(bigbar):
@@ -141,24 +140,24 @@ class Solver:
 
         logging.info("Saving {} to file: {}".format("model" if save_whole else "states", name))
         if save_whole:
-            torch.save({"model":self.translator}, name)
+            torch.save({"model":self.summarizer}, name)
         else:
-            torch.save({"state":self.translator.state_dict()}, name)
+            torch.save({"state":self.summarizer.state_dict()}, name)
         logging.info("Saving complete.")
 
 
     def train_G(self, src, nxt, max_len, N=1, update=True, stage=1, custom_loss=True):
 
-        self.translator.train()
+        self.summarizer.train()
         self.discriminator.train()
 
         for _ in range(N):
-            src_mask = (src != self.PAD_id) #not used in PG
-            # ys_hot, covloss = self.translator(src, src_mask=src_mask, max_len=max_len, 
-            #         start_symbol=self.PAD_id, gumbel_tau=self.gumbel_tau, return_index=False, keep_bos=False)
+            src_mask = (src != self.pad_token_id) #not used in PG
+            # ys_hot, covloss = self.summarizer(src, src_mask=src_mask, max_len=max_len, 
+            #         start_symbol=self.pad_token_id, gumbel_tau=self.gumbel_tau, return_index=False, keep_bos=False)
 
-            ys_hot = self.translator(src, src_mask=src_mask, max_len=max_len, 
-                    start_symbol=self.PAD_id, gumbel_tau=self.gumbel_tau, return_index=False, keep_bos=False)
+            ys_hot = self.summarizer(src, src_mask=src_mask, max_len=max_len, 
+                    start_symbol=self.pad_token_id, gumbel_tau=self.gumbel_tau, return_index=False, keep_bos=False)
 
             if stage == 2:
                 # concat with nxt
@@ -176,7 +175,7 @@ class Solver:
 
             # calculate mask
             lm_index = lm_input.argmax(dim=-1)          
-            attn_mask = (lm_index != self.PAD_id)
+            attn_mask = (lm_index != self.pad_token_id)
             ys = lm_index[:,:max_len]
             """attention_mask: (optional) torch.FloatTensor of shape (batch_size, sequence_length):
             Mask to avoid performing attention on padding token indices. Mask values selected in [0, 1]: 1 for tokens that are NOT MASKED, 0 for MASKED tokens.
@@ -188,10 +187,10 @@ class Solver:
 
                 b,s,v = xent_input.shape
                 xent = F.kl_div(log_p_LM.view(b*s, v), xent_input.view(b*s, v), reduction="mean") # (b, s)
-                xent[lm_index==self.PAD_id] = 0
+                xent[lm_index==self.pad_token_id] = 0
                 xent = xent.mean()# reduction
             else:
-                lm_index = tensor_replace(lm_index, self.PAD_id, -1)
+                lm_index = tensor_replace(lm_index, self.pad_token_id, -1)
                 xent, lm_logits = self.discriminator(lm_input, attention_mask=attn_mask, labels=lm_index)
 
             gloss = xent #+ covloss
@@ -216,9 +215,9 @@ class Solver:
 
         # concat with nxt
         src_nxt = torch.cat((src, nxt), dim=1)
-        labels = tensor_replace(src_nxt, self.PAD_id, -1) # the xent in gpt2 ignores -1 as label
+        labels = tensor_replace(src_nxt, self.pad_token_id, -1) # the xent in gpt2 ignores -1 as label
 
-        attn_mask = (src_nxt != self.PAD_id)
+        attn_mask = (src_nxt != self.pad_token_id)
         # real_loss = discriminator.inference(tgt[:,1:], start_index=vocab[BOS], ignore_index=vocab[PAD], return_prob=False).mean()
         for _ in range(N):
             real_loss, lm_logits = self.discriminator(src_nxt, attention_mask=attn_mask, labels=labels)
@@ -230,6 +229,52 @@ class Solver:
             self.optimizer_D.zero_grad()
         
         return real_loss.item()
+
+
+    def pretrain(self, start, epochs):
+        logging.info("Start pretraining from epoch {}. Total {} epochs.".format(start, epochs))
+        self.step = 0
+        for e in range(start, epochs+1):
+            bigbar = tqdm(self.data_generator, total=self.data_generator.total, 
+                desc="[epoch] {}".format(e))
+            
+            for i, (src, lbl) in enumerate(bigbar):
+                src = src.to(self.device)
+                lbl = lbl.to(self.device)
+                
+                attn_mask = (src != self.pad_token_id)
+
+                outputs = self.discriminator(src, nli_labels=lbl, attention_mask=attn_mask)
+                nli_loss = outputs[0]
+                nli_loss.backward()
+             
+                self.optimizer_D.step()
+                self.optimizer_D.zero_grad()
+
+                       
+                ### logging
+                bigbar.set_postfix(
+                    nli_loss=nli_loss
+                    # cov_loss=cov_loss,
+                    )
+
+                info = {
+                        "nli_loss":nli_loss
+                              }
+                if self.use_wandb: 
+                    wandb.log(info)
+                else:
+                    print(info)
+                ###########                
+
+                if i % 5000 == 4999:
+                    self.checkpoint()
+
+                self.step += 1
+                if (self.step + 1) % self.steps_per_save == 0:
+                    self.checkpoint(step=self.step)
+                    
+            self.checkpoint(epoch=e)
 
 
 
@@ -347,6 +392,36 @@ class PointerGenerator(nn.Module):
             return ys.transpose(0, 1), covloss
         return ys.transpose(0, 1)
 
+
+class GPT2Discriminator(nn.Module):
+    def __init__(self, n_labels, preload='distilgpt2'):
+        super().__init__()
+        if isinstance(preload, str):
+            self.gpt2 = GPT2Model.from_pretrained(preload)
+        else:
+            self.gpt2 = preload
+        self.nli_head = nn.Linear(self.gpt2.config.n_embd, n_labels)
+        # self.vocab_size = self.gpt2.config.vocab_size
+
+    def forward(self, word_ids, nli_labels=None, *args, **kwargs):
+        if word_ids.dim() < 2:
+            raise RuntimeError("word_ids should be (batch, len) or (batch, len, vocab)")
+        elif word_ids.dim() == 2:
+            outputs = self.gpt2(word_ids,*args, **kwargs)
+        elif word_ids.dim() == 3:
+            tok_emb = torch.matmul(word_ids, self.gpt2.transformer.wte.weight)
+            outputs = self.gpt2(inputs_embeds=tok_emb,*args, **kwargs)        
+        # outputs = (loss,) logits, past
+        #if len(outputs)==2:
+        #    return outputs[0]
+        hidden, past = outputs[:2]
+
+        if nli_labels is not None:
+            logits = self.nli_head(hidden[:,-1:])
+            nli_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), nli_labels.view(-1))
+            outputs = (nli_loss,) + outputs
+
+        return outputs #[:2]
 
 class GPT2LM(nn.Module):
     def __init__(self, preload='distilgpt2'):
