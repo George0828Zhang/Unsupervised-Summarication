@@ -130,7 +130,7 @@ class Solver:
                     
             self.checkpoint(epoch=e)
 
-    def checkpoint(self, step=None, epoch=None, save_whole=False):
+    def checkpoint(self, step=None, epoch=None, save_whole=False, save_discriminator=False):
         if epoch is not None:
             name = os.path.join(self.out_dir, "checkpoint-epoch{}".format(epoch))
         elif step is not None:
@@ -139,10 +139,17 @@ class Solver:
             name = os.path.join(self.out_dir, "checkpoint-fresh")
 
         logging.info("Saving {} to file: {}".format("model" if save_whole else "states", name))
-        if save_whole:
-            torch.save({"model":self.summarizer}, name)
+
+        if save_discriminator:
+            if save_whole:
+                torch.save({"model":self.discriminator}, name)
+            else:
+                torch.save({"state":self.discriminator.state_dict()}, name)
         else:
-            torch.save({"state":self.summarizer.state_dict()}, name)
+            if save_whole:
+                torch.save({"model":self.summarizer}, name)
+            else:
+                torch.save({"state":self.summarizer.state_dict()}, name)
         logging.info("Saving complete.")
 
 
@@ -267,14 +274,14 @@ class Solver:
                     print(info)
                 ###########                
 
-                if i % 5000 == 4999:
-                    self.checkpoint()
+                if i % 1000 == 999:
+                    self.checkpoint(save_discriminator=True)
 
                 self.step += 1
                 if (self.step + 1) % self.steps_per_save == 0:
-                    self.checkpoint(step=self.step)
+                    self.checkpoint(step=self.step, save_discriminator=True)
                     
-            self.checkpoint(epoch=e)
+            self.checkpoint(epoch=e, save_discriminator=True)
 
 
 
