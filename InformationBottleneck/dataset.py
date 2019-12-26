@@ -386,5 +386,5 @@ class SNLIProcessor(BasicProcessor):
         to = min(fr+batch_size, self.size)
         src_tgt = self.np_jagged(self.src_tgt[fr:to])
         padded = torch.from_numpy(src_tgt)
-        clstail = torch.tensor([self.tokenizer.cls_token_id]).repeat(batch_size, 1)
+        clstail = torch.tensor([self.tokenizer.cls_token_id]).repeat(padded.size(0), 1)
         return torch.cat((padded, clstail), dim=1), torch.LongTensor(self.labels[fr:to])
