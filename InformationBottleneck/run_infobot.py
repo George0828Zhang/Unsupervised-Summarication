@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+import re
 import os
 import sys
 import argparse
@@ -36,6 +37,8 @@ def main():
                         help="Whether to run training.")
     parser.add_argument("--do_pretrain", action='store_true',
                         help="Whether to run pretraining.")
+    parser.add_argument("--do_pretest", action='store_true',
+                        help="Whether to run testing for pretrain stage.")
     parser.add_argument("--do_eval", action='store_true',
                         help="Whether to run eval on the test set.")
     parser.add_argument("--use_wandb", action='store_true',
@@ -79,7 +82,9 @@ def main():
     parser.add_argument("--stage", default=1, type=int,
                         help="Starting stage. Stage 1 uses GPT2 to smoothen seq2seq output,"
                         " while stage 2 uses next sentence to enforce information bottleneck.")
-
+    parser.add_argument("--pretrained_D", default="", type=str,
+                        help="Path to pretrained discriminator model weights.")
+    
     
 
     parser.add_argument("--max_seq_length", default=128, type=int,
@@ -124,28 +129,70 @@ def main():
     #########
 
     if args.do_pretrain:
-        data_generator = load_and_cache_examples(args, tokenizer, phase="pretrain")
-        discriminator = GPT2Discriminator(n_labels=3, preload='distilgpt2').to()
-        discriminator.gpt2.resize_token_embeddings(len(tokenizer))
-
-
-        optimizer_D = torch.optim.RMSprop(discriminator.nli_head.parameters(), lr=args.learning_rate_D, weight_decay=args.weight_decay_D)
         
-        solver = Solver(args, tokenizer=tokenizer, 
-            summarizer=None, 
-            discriminator=discriminator, 
+        prototype = GPT2LMHeadModel.from_pretrained('distilgpt2')
+        prototype.resize_token_embeddings(len(tokenizer))
+
+        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype)
+
+        if os.path.isfile(args.pretrained_D):
+            tmp = torch.load(args.pretrained_D)['state']
+            # tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}            
+            discriminator.load_state_dict(tmp, strict=False)
+
+        data_generator = load_and_cache_examples(args, tokenizer, phase="pretrain")
+        
+
+        optimizer_D = torch.optim.RMSprop(discriminator.parameters(), lr=args.learning_rate_D, weight_decay=args.weight_decay_D)
+        
+        solver = Solver(args, tokenizer=tokenizer,             
             data_generator=data_generator,
+            discriminator=discriminator, 
             optimizer_D=optimizer_D,
-            optimizer_G=None
         )
         solver.pretrain(start=args.start_epoch, epochs=args.num_train_epochs)
-        discriminator.gpt2.save_pretrained(os.path.join(args.output_dir, "final"))
-    else:
-        raise NotImplementedError("yet to fix optimizer")
+
+    elif args.do_pretest:       
+
+        prototype = GPT2LMHeadModel.from_pretrained('distilgpt2')
+        prototype.resize_token_embeddings(len(tokenizer))
+
+        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype)
+
+        tmp = torch.load(args.pretrained_D)['state']
+        # tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}        
+        discriminator.load_state_dict(tmp, strict=False)
+
+        data_generator = load_and_cache_examples(args, tokenizer, phase="pretest")
+
+        solver = Solver(args, tokenizer=tokenizer, 
+            data_generator=data_generator,
+            discriminator=discriminator,
+        )
+        solver.pretest()
+
+    elif args.do_train or args.do_eval:
+
         if args.do_train:
             phase="train"
-        elif args.do_eval:
+        else:
             phase="val"
+
+        prototype = GPT2LMHeadModel.from_pretrained('distilgpt2')
+        prototype.resize_token_embeddings(len(tokenizer))
+
+        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype)
+        tmp = torch.load(args.pretrained_D)['state']
+        tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}
+        
+        discriminator.load_state_dict(tmp, strict=False)
+
+        data_generator = load_and_cache_examples(args, tokenizer, phase="pretrain")
+
+
+
+        raise NotImplementedError("yet to fix optimizer")
+        
         data_generator = load_and_cache_examples(args, tokenizer, phase=phase)
         discriminator = GPT2LM(preload='distilgpt2')
         # summarizer = PointerGenerator(vocab_size=discriminator.vocab_size, 
@@ -166,8 +213,9 @@ def load_and_cache_examples(args, tokenizer, phase="train"):
     outname = "{}.{}.bin".format(args.task, phase)
     outpath = os.path.join(args.data_dir, outname)
     
-    if phase == "pretrain":
-        processor = SNLIProcessor(args.data_dir, tokenizer, phase="train")
+    if re.match("^pre", phase) is not None:
+        phase = phase.replace("pre","")
+        processor = SNLIProcessor(args.data_dir, tokenizer, phase=phase)
     else:
         processor = NextSentenceProcessor(args.data_dir, tokenizer, phase=phase, min_bytes=args.min_byte_length)
 

@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Model, GPT2LMHeadModel, GPT2Tokenizer
 
+from sklearn.metrics import f1_score
 
 import wandb
 
@@ -26,8 +27,12 @@ def tensor_replace(x, fr, to):
     return out
 
 class Solver:
-    def __init__(self, args, tokenizer, summarizer, discriminator, data_generator,
-        optimizer_G, optimizer_D ):  
+    def __init__(self, args, tokenizer, 
+        data_generator,
+        summarizer=None, 
+        discriminator=None, 
+        optimizer_G=None, 
+        optimizer_D=None ):  
         # Params
         self.use_wandb = args.use_wandb
         self.batch_size = args.batch_size
@@ -261,12 +266,12 @@ class Solver:
                        
                 ### logging
                 bigbar.set_postfix(
-                    nli_loss=nli_loss
+                    nli_loss=nli_loss.item()
                     # cov_loss=cov_loss,
                     )
 
                 info = {
-                        "nli_loss":nli_loss
+                        "nli_loss":nli_loss.item()
                               }
                 if self.use_wandb: 
                     wandb.log(info)
@@ -283,7 +288,56 @@ class Solver:
                     
             self.checkpoint(epoch=e, save_discriminator=True)
 
+    def pretest(self):
+        logging.info("Start evaluation for pretraining stage.")
+        
+        bigbar = tqdm(self.data_generator, total=self.data_generator.total, 
+                desc="Evaluation")
+            
+        avg_loss = []
+        _pred = []
+        _real = []
+        for i, (src, lbl) in enumerate(bigbar):
+            src = src.to(self.device)
+            lbl = lbl.to(self.device)
+            
+            attn_mask = (src != self.pad_token_id)
 
+            outputs = self.discriminator(src, nli_labels=lbl, attention_mask=attn_mask)
+            nli_loss, nli_logits = outputs[:2]
+
+            _pred.append(nli_logits.cpu().detach())
+            _real.append(lbl.cpu().detach())
+
+            ### logging
+            bigbar.set_postfix(
+                nli_loss=nli_loss.item(),
+                )
+
+            avg_loss.append(nli_loss.item())
+
+        all_logits = torch.cat(_pred, dim=0).view(-1, self.discriminator.n_labels)
+        all_y = torch.cat(_real, dim=0).view(-1)
+
+        f1 = self.f1_compute(logits=all_logits, y=all_y)
+
+        print("average loss:", np.mean(avg_loss))
+        print("f1:", f1)
+
+    def f1_compute(self, logits, y):
+        # everyone uses macro, but class imbalance should use micro
+        batch_size = y.shape[0]
+        _, predict = torch.max(logits, dim=1)
+        
+        y = y.type(predict.dtype)
+
+        # to cpu
+        y = y.cpu()
+        predict = predict.cpu()
+
+        f1 = f1_score(y_true=y.view(batch_size,-1), y_pred=predict.view(batch_size,-1), average='macro')
+
+        return f1
 
 class PointerGenerator(nn.Module):
     def __init__(self, vocab_size, d_model, d_emb, num_layers=2, dropout=0.5, coverage=True, eps=1e-10):
@@ -401,34 +455,51 @@ class PointerGenerator(nn.Module):
 
 
 class GPT2Discriminator(nn.Module):
-    def __init__(self, n_labels, preload='distilgpt2'):
-        super().__init__()
-        if isinstance(preload, str):
-            self.gpt2 = GPT2Model.from_pretrained(preload)
-        else:
-            self.gpt2 = preload
-        self.nli_head = nn.Linear(self.gpt2.config.n_embd, n_labels)
-        # self.vocab_size = self.gpt2.config.vocab_size
+    def __init__(self, n_labels, prototype):
+        super().__init__()        
+        self.transformer = prototype.transformer
+        self.lm_head = prototype.lm_head
+        self.n_labels = n_labels
+        self.nli_head = nn.Linear(prototype.config.n_embd, n_labels)
 
-    def forward(self, word_ids, nli_labels=None, *args, **kwargs):
+    def forward(
+        self,        
+        word_ids, 
+        lm_labels=None,
+        nli_labels=None,
+        *args, **kwargs,
+    ):
         if word_ids.dim() < 2:
             raise RuntimeError("word_ids should be (batch, len) or (batch, len, vocab)")
         elif word_ids.dim() == 2:
-            outputs = self.gpt2(word_ids,*args, **kwargs)
+            transformer_outputs = self.transformer(word_ids,*args, **kwargs)
         elif word_ids.dim() == 3:
-            tok_emb = torch.matmul(word_ids, self.gpt2.transformer.wte.weight)
-            outputs = self.gpt2(inputs_embeds=tok_emb,*args, **kwargs)        
-        # outputs = (loss,) logits, past
-        #if len(outputs)==2:
-        #    return outputs[0]
-        hidden, past = outputs[:2]
+            tok_emb = torch.matmul(word_ids, self.transformer.wte.weight)
+            transformer_outputs = self.transformer(inputs_embeds=tok_emb,*args, **kwargs)
+
+        hidden_states = transformer_outputs[0]
+
+        lm_logits = self.lm_head(hidden_states)
+
+        outputs = (lm_logits,) + transformer_outputs[1:]
+        if lm_labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = lm_labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            outputs = (loss,) + outputs
+
+        nli_logits = self.nli_head(hidden_states[:,-1:])
+        outputs = (nli_logits,) + outputs
 
         if nli_labels is not None:
-            logits = self.nli_head(hidden[:,-1:])
-            nli_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), nli_labels.view(-1))
+            nli_loss = F.cross_entropy(nli_logits.view(-1, nli_logits.size(-1)), nli_labels.view(-1))
             outputs = (nli_loss,) + outputs
 
-        return outputs #[:2]
+        return outputs  # (loss), lm_logits, presents, (all hidden_states), (attentions)
+
 
 class GPT2LM(nn.Module):
     def __init__(self, preload='distilgpt2'):
