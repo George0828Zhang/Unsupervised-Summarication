@@ -133,9 +133,10 @@ def main():
         prototype = GPT2LMHeadModel.from_pretrained('distilgpt2')
         prototype.resize_token_embeddings(len(tokenizer))
 
-        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype)
+        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype, cls_token_id=tokenizer.cls_token_id)
 
         if os.path.isfile(args.pretrained_D):
+            logging.info("Loading from discriminator checkpoint: "+args.pretrained_D)
             tmp = torch.load(args.pretrained_D)['state']
             # tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}            
             discriminator.load_state_dict(tmp, strict=False)
@@ -157,8 +158,9 @@ def main():
         prototype = GPT2LMHeadModel.from_pretrained('distilgpt2')
         prototype.resize_token_embeddings(len(tokenizer))
 
-        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype)
+        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype, cls_token_id=tokenizer.cls_token_id)
 
+        logging.info("Loading from discriminator checkpoint: "+args.pretrained_D)
         tmp = torch.load(args.pretrained_D)['state']
         # tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}        
         discriminator.load_state_dict(tmp, strict=False)

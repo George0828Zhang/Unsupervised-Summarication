@@ -275,8 +275,8 @@ class Solver:
                               }
                 if self.use_wandb: 
                     wandb.log(info)
-                else:
-                    print(info)
+                # else:
+                #     print(info)
                 ###########                
 
                 if i % 1000 == 999:
@@ -455,12 +455,13 @@ class PointerGenerator(nn.Module):
 
 
 class GPT2Discriminator(nn.Module):
-    def __init__(self, n_labels, prototype):
+    def __init__(self, n_labels, prototype, cls_token_id):
         super().__init__()        
         self.transformer = prototype.transformer
         self.lm_head = prototype.lm_head
         self.n_labels = n_labels
         self.nli_head = nn.Linear(prototype.config.n_embd, n_labels)
+        self.cls_token_id = cls_token_id
 
     def forward(
         self,        
@@ -476,6 +477,7 @@ class GPT2Discriminator(nn.Module):
         elif word_ids.dim() == 3:
             tok_emb = torch.matmul(word_ids, self.transformer.wte.weight)
             transformer_outputs = self.transformer(inputs_embeds=tok_emb,*args, **kwargs)
+            word_ids = word_ids.argmax(dim=-1)
 
         hidden_states = transformer_outputs[0]
 
@@ -491,7 +493,8 @@ class GPT2Discriminator(nn.Module):
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             outputs = (loss,) + outputs
 
-        nli_logits = self.nli_head(hidden_states[:,-1:])
+        # nli_logits = self.nli_head(hidden_states[:,-1:])
+        nli_logits = self.nli_head(hidden_states[word_ids==self.cls_token_id])
         outputs = (nli_logits,) + outputs
 
         if nli_labels is not None:

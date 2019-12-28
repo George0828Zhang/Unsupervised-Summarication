@@ -356,35 +356,39 @@ class SNLIProcessor(BasicProcessor):
 
         assert len(src_list) == len(tgt_list)
         assert len(src_list) == len(lbl_list)
-
-        self.size = len(src_list)
+       
             
         self.src_tgt = []
-
+        self.labels = []
         
         self.pad_idx = pad_idx
 
         BOS = [self.tokenizer.bos_token_id]
         CLS = [self.tokenizer.cls_token_id]
         SEP = [self.tokenizer.sep_token_id]
-        for i in trange(self.size):
+        for i in trange(len(src_list)):
             src = src_list[i][:SRC_MAX]
             tgt = tgt_list[i][:NXT_MAX]
-            fmt = BOS + src + SEP + tgt
-            self.src_tgt.append(fmt)
+            self.src_tgt.append(BOS + src + SEP + tgt + CLS)
+            self.src_tgt.append(BOS + tgt + SEP + src + CLS) # data augmentation
+            self.labels.append(lbl_list[i])
+            self.labels.append(lbl_list[i]) # data augmentation
         
         # self.src_tgt = sorted(self.src_tgt, key=lambda x: -len(x)) # descending
+
+        self.size = len(self.src_tgt)
 
         len_dist = [len(x) for x in self.src_tgt]
         idx = np.argsort(len_dist)[::-1] # descending
         
         self.src_tgt = [ self.src_tgt[i] for i in idx]
-        self.labels = [ lbl_list[i] for i in idx]
+        self.labels = [ self.labels[i] for i in idx]
 
     def at(self, i, batch_size=1):
         fr = i*batch_size
         to = min(fr+batch_size, self.size)
         src_tgt = self.np_jagged(self.src_tgt[fr:to])
         padded = torch.from_numpy(src_tgt)
-        clstail = torch.tensor([self.tokenizer.cls_token_id]).repeat(padded.size(0), 1)
-        return torch.cat((padded, clstail), dim=1), torch.LongTensor(self.labels[fr:to])
+        return padded, torch.LongTensor(self.labels[fr:to])
+        # clstail = torch.tensor([self.tokenizer.cls_token_id]).repeat(padded.size(0), 1)
+        # return torch.cat((padded, clstail), dim=1), torch.LongTensor(self.labels[fr:to])
