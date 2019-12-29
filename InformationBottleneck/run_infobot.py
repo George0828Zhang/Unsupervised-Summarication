@@ -98,6 +98,8 @@ def main():
                         help="Whether to group training sequence based on next sentence (nxt). Default is group by source (src).")
     parser.add_argument("--use_custom_loss", action='store_true',
                         help="Whether to use the KL_div loss we proposed, instead of cross entropy.")
+    parser.add_argument("--nli_weight", default=1.0, type=float,
+                        help="Weight for nli loss in training.")
     args = parser.parse_args()
     
     
@@ -139,7 +141,7 @@ def main():
             logging.info("Loading from discriminator checkpoint: "+args.pretrained_D)
             tmp = torch.load(args.pretrained_D)['state']
             # tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}            
-            discriminator.load_state_dict(tmp, strict=False)
+            discriminator.load_state_dict(tmp)
 
         data_generator = load_and_cache_examples(args, tokenizer, phase="pretrain")
         
@@ -163,7 +165,7 @@ def main():
         logging.info("Loading from discriminator checkpoint: "+args.pretrained_D)
         tmp = torch.load(args.pretrained_D)['state']
         # tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}        
-        discriminator.load_state_dict(tmp, strict=False)
+        discriminator.load_state_dict(tmp)
 
         data_generator = load_and_cache_examples(args, tokenizer, phase="pretest")
 
@@ -183,32 +185,34 @@ def main():
         prototype = GPT2LMHeadModel.from_pretrained('distilgpt2')
         prototype.resize_token_embeddings(len(tokenizer))
 
-        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype)
+        discriminator = GPT2Discriminator(n_labels=3, prototype=prototype, cls_token_id=tokenizer.cls_token_id)
+
+        logging.info("Loading from discriminator checkpoint: "+args.pretrained_D)
         tmp = torch.load(args.pretrained_D)['state']
-        tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}
-        
-        discriminator.load_state_dict(tmp, strict=False)
+        # tmp = { x:tmp[x] for x in ('nli_head.weight', 'nli_head.bias')}        
+        discriminator.load_state_dict(tmp) # , strict=False
 
-        data_generator = load_and_cache_examples(args, tokenizer, phase="pretrain")
+        summarizer = PointerGenerator(vocab_size=len(tokenizer), 
+            d_model=256, d_emb=256, num_layers=2, dropout=0.1, coverage=False)
 
+        # summarizer = GPT2Summarizer(
+        #     delimiter=torch.tensor(tokenizer.encode("TL;DR:")),
+        #     preload=prototype
+        #     )
 
-
-        raise NotImplementedError("yet to fix optimizer")
-        
         data_generator = load_and_cache_examples(args, tokenizer, phase=phase)
-        discriminator = GPT2LM(preload='distilgpt2')
-        # summarizer = PointerGenerator(vocab_size=discriminator.vocab_size, 
-        #     d_model=256, d_emb=256, num_layers=2, dropout=0.1, coverage=True)
-        summarizer = GPT2Summarizer(preload='distilgpt2')
-        
 
+        optimizer_D = torch.optim.RMSprop(discriminator.parameters(), lr=args.learning_rate_D, weight_decay=args.weight_decay_D)
+        optimizer_G = torch.optim.RMSprop(summarizer.parameters(), lr=args.learning_rate_G, weight_decay=args.weight_decay_G)
+        
         solver = Solver(args, tokenizer=tokenizer, 
-            summarizer=summarizer, 
-            discriminator=discriminator, 
             data_generator=data_generator,
-            optim=torch.optim.RMSprop,
+            summarizer=summarizer, 
+            discriminator=discriminator,
+            optimizer_G=optimizer_G,
+            optimizer_D=optimizer_D
             )
-        solver.solve(start=args.start_epoch, epochs=args.num_train_epochs, stage=args.stage)
+        solver.solve(start=args.start_epoch, epochs=args.num_train_epochs, stage=args.stage)        
 
 
 def load_and_cache_examples(args, tokenizer, phase="train"):    
@@ -218,8 +222,11 @@ def load_and_cache_examples(args, tokenizer, phase="train"):
     if re.match("^pre", phase) is not None:
         phase = phase.replace("pre","")
         processor = SNLIProcessor(args.data_dir, tokenizer, phase=phase)
+    elif "giga" in args.task:
+        processor = GigawordProcessor(args.data_dir, tokenizer, phase=phase)
     else:
         processor = NextSentenceProcessor(args.data_dir, tokenizer, phase=phase, min_bytes=args.min_byte_length)
+        # processor = GigawordProcessor(args.data_dir, tokenizer, phase=phase)
 
     if not os.path.isfile(outpath) or args.overwrite_cache:
         logging.warning("No cached file, or overwrite specified. Running preprocessing.")

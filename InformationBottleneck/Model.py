@@ -40,6 +40,7 @@ class Solver:
         self.summ_length = args.summ_length
         self.step = 0
         self.use_custom_loss = args.use_custom_loss
+        self.nli_weight = args.nli_weight / (1+args.nli_weight)
 
         if self.use_wandb:
             wandb_resume = False
@@ -48,6 +49,7 @@ class Solver:
                 "batch size": args.batch_size,
                 "input len":args.max_seq_length,
                 "summary len":args.summ_length,       
+                "nli weight":self.nli_weight,
                 "weight decay": {"D":args.weight_decay_D, "G":args.weight_decay_G},
                 "learning rate": {"D":args.learning_rate_D, "G":args.learning_rate_G}
                 })
@@ -56,7 +58,7 @@ class Solver:
         self.steps_per_save = args.steps_per_save
         self.device = torch.device("cpu" if args.no_cuda else "cuda")
         self.tokenizer = tokenizer
-        self.vocab_size = tokenizer.vocab_size
+        self.vocab_size = len(tokenizer)
         self.pad_token_id = tokenizer.pad_token_id
         self.out_dir = args.output_dir
 
@@ -85,7 +87,7 @@ class Solver:
 
     def id2sent(self, ids, pad="<s>"):
         toks = self.tokenizer.decode(ids)
-        return toks.replace("<|endoftext|>", pad)
+        return toks.replace(self.tokenizer.pad_token, pad)
 
     # def tstring(r):
     #     return ", ".join([format(f, ".5g") for f in r.cpu().numpy()])
@@ -102,23 +104,26 @@ class Solver:
                 src = src.to(self.device)
                 nxt = nxt.to(self.device)
 
-                d_loss = self.train_D(src=src, nxt=nxt, N=1, update=True)
-                g_loss, ys = self.train_G(src=src, nxt=nxt, max_len=self.summ_length, 
-                    N=1, update=True, stage=stage, custom_loss=self.use_custom_loss)
+                d_loss = self.train_D(src=src)
+                # g_loss, ys = self.train_G(src=src, nxt=nxt, max_len=self.summ_length, 
+                #     N=1, update=True, stage=stage, custom_loss=self.use_custom_loss)
+                lm_loss, nli_loss, ys = self.train_G(src=src, max_len=self.summ_length, 
+                    N=1, update=True)
                                 
                 ### logging
                 bigbar.set_postfix(
                     d_loss=d_loss,
-                    g_loss=g_loss,
-                    # cov_loss=cov_loss,
+                    lm_loss=lm_loss,
+                    nli_loss=nli_loss,
                     )
 
                 info = {
                         "input":self.id2sent(src[0].cpu().numpy()),
                         "output":self.id2sent(ys[0].cpu().numpy()),
-                        "next":self.id2sent(nxt[0].cpu().numpy()),
+                        "target":self.id2sent(nxt[0].cpu().numpy()),
                         "d_loss":d_loss,
-                        "g_loss":g_loss,
+                        "lm_loss":lm_loss,
+                        "nli_loss":nli_loss,
                               }
                 if self.use_wandb: 
                     wandb.log(info)
@@ -138,12 +143,12 @@ class Solver:
     def checkpoint(self, step=None, epoch=None, save_whole=False, save_discriminator=False):
         if epoch is not None:
             name = os.path.join(self.out_dir, "checkpoint-epoch{}".format(epoch))
+            logging.info("Saving {} to file: {}".format("model" if save_whole else "states", name))
         elif step is not None:
             name = os.path.join(self.out_dir, "checkpoint-step{}".format(step))
+            logging.info("Saving {} to file: {}".format("model" if save_whole else "states", name))
         else:
-            name = os.path.join(self.out_dir, "checkpoint-fresh")
-
-        logging.info("Saving {} to file: {}".format("model" if save_whole else "states", name))
+            name = os.path.join(self.out_dir, "checkpoint-fresh")        
 
         if save_discriminator:
             if save_whole:
@@ -155,10 +160,66 @@ class Solver:
                 torch.save({"model":self.summarizer}, name)
             else:
                 torch.save({"state":self.summarizer.state_dict()}, name)
-        logging.info("Saving complete.")
 
 
-    def train_G(self, src, nxt, max_len, N=1, update=True, stage=1, custom_loss=True):
+    def train_G(self, src, max_len, N=1, update=True):
+
+        self.summarizer.train()
+        self.discriminator.train()
+
+        for _ in range(N):
+            src_mask = (src != self.pad_token_id) #not used in PG
+            
+            ys_hot = self.summarizer(src, src_mask=src_mask, max_len=max_len, 
+                    start_symbol=self.tokenizer.bos_token_id, gumbel_tau=self.gumbel_tau, return_index=False, keep_bos=False)
+
+            ys = ys_hot.argmax(dim=-1)
+
+            # lm loss
+            attn_mask = (ys != self.pad_token_id)
+            lm_index = tensor_replace(ys, self.pad_token_id, -100)
+            outputs_1 = self.discriminator(ys_hot, attention_mask=attn_mask, lm_labels=lm_index)
+            lm_loss = outputs_1[0]
+
+            # nli loss
+            CLS = torch.tensor([self.tokenizer.cls_token_id]).repeat(src.size(0), 1)
+
+            premise_hot = _one_hot(src, self.vocab_size).type_as(ys_hot)
+            cls_hot = _one_hot(CLS, self.vocab_size).type_as(ys_hot)
+
+            nli_input = torch.cat([premise_hot, ys_hot, cls_hot], dim=1)
+            nli_label = torch.ones(nli_input.size(0)).type_as(src)
+
+            ######## debug #######
+            # _nli_input = nli_input.argmax(dim=-1)
+            # for sent in _nli_input:
+            #     where_cls = sent==self.tokenizer.cls_token_id
+            #     if where_cls.sum() != 1:
+            #         print(self.tokenizer.decode(sent.cpu().numpy()))
+            ######################
+
+            attn_mask = (nli_input.argmax(dim=-1) != self.pad_token_id)
+            outputs_2 = self.discriminator(nli_input, nli_labels=nli_label, attention_mask=attn_mask)
+            nli_loss = outputs_2[0]           
+
+            gloss = lm_loss*(1.-self.nli_weight) + nli_loss*self.nli_weight
+
+            gloss /= N
+            gloss.backward()
+
+        if update:
+            self.optimizer_G.step()
+            self.optimizer_G.zero_grad()
+            # clear gradient computed for G but accumulated on D
+            # self.optimizer_D.zero_grad()
+            self.discriminator.zero_grad()
+
+
+
+        return lm_loss.item(), nli_loss.item(), ys
+
+
+    def train_G_nextsent(self, src, nxt, max_len, N=1, update=True, stage=1, custom_loss=True):
 
         self.summarizer.train()
         self.discriminator.train()
@@ -202,7 +263,7 @@ class Solver:
                 xent[lm_index==self.pad_token_id] = 0
                 xent = xent.mean()# reduction
             else:
-                lm_index = tensor_replace(lm_index, self.pad_token_id, -1)
+                lm_index = tensor_replace(lm_index, self.pad_token_id, -100)
                 xent, lm_logits = self.discriminator(lm_input, attention_mask=attn_mask, labels=lm_index)
 
             gloss = xent #+ covloss
@@ -221,18 +282,19 @@ class Solver:
 
         return gloss.item(), ys
 
-    def train_D(self, src, nxt, N=1, update=True):
+    def train_D(self, src, nxt=None, N=1, update=True):
         
         self.discriminator.train()
 
         # concat with nxt
-        src_nxt = torch.cat((src, nxt), dim=1)
-        labels = tensor_replace(src_nxt, self.pad_token_id, -1) # the xent in gpt2 ignores -1 as label
+        src_nxt = src if nxt==None else torch.cat((src, nxt), dim=1)
+        labels = tensor_replace(src_nxt, self.pad_token_id, -100) # the xent in gpt2 ignores -100 as label
 
         attn_mask = (src_nxt != self.pad_token_id)
         # real_loss = discriminator.inference(tgt[:,1:], start_index=vocab[BOS], ignore_index=vocab[PAD], return_prob=False).mean()
         for _ in range(N):
-            real_loss, lm_logits = self.discriminator(src_nxt, attention_mask=attn_mask, labels=labels)
+            outputs = self.discriminator(src_nxt, attention_mask=attn_mask, lm_labels=labels)
+            real_loss = outputs[0]
             real_loss /= N
             real_loss.backward()
          
@@ -320,9 +382,11 @@ class Solver:
         all_y = torch.cat(_real, dim=0).view(-1)
 
         f1 = self.f1_compute(logits=all_logits, y=all_y)
+        acc = self.acc_compute(logits=all_logits, y=all_y)
 
         print("average loss:", np.mean(avg_loss))
         print("f1:", f1)
+        print("acc:", acc)
 
     def f1_compute(self, logits, y):
         # everyone uses macro, but class imbalance should use micro
@@ -338,6 +402,17 @@ class Solver:
         f1 = f1_score(y_true=y.view(batch_size,-1), y_pred=predict.view(batch_size,-1), average='macro')
 
         return f1
+
+    def acc_compute(self, logits, y):
+        batch_size = y.shape[0]
+        predict = logits.argmax(dim=-1)
+        
+        y=y.view(-1)
+        predict=predict.view(-1)
+
+        acc = (predict==y).sum().item() / predict.shape[0]
+
+        return acc
 
 class PointerGenerator(nn.Module):
     def __init__(self, vocab_size, d_model, d_emb, num_layers=2, dropout=0.5, coverage=True, eps=1e-10):
@@ -493,11 +568,18 @@ class GPT2Discriminator(nn.Module):
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             outputs = (loss,) + outputs
 
-        # nli_logits = self.nli_head(hidden_states[:,-1:])
-        nli_logits = self.nli_head(hidden_states[word_ids==self.cls_token_id])
-        outputs = (nli_logits,) + outputs
+        # nli_logits = self.nli_head(hidden_states[:,-1:])        
 
         if nli_labels is not None:
+            # where_cls = word_ids==self.cls_token_id # bug: model might output cls as well. assertion fails
+            # assert where_cls.sum() == word_ids.size(0)
+            # nli_logits = self.nli_head(hidden_states[where_cls])
+
+            where_cls = (word_ids==self.cls_token_id).float().argmax(dim=-1) # (batch,)
+            where_cls = _one_hot(where_cls, hidden_states.size(1)).bool() # (batch, len)
+            
+            nli_logits = self.nli_head(hidden_states[where_cls])
+            outputs = (nli_logits,) + outputs
             nli_loss = F.cross_entropy(nli_logits.view(-1, nli_logits.size(-1)), nli_labels.view(-1))
             outputs = (nli_loss,) + outputs
 
@@ -528,16 +610,14 @@ class GPT2LM(nn.Module):
         return outputs[:2]
 
 class GPT2Summarizer(nn.Module):
-    def __init__(self, preload='distilgpt2'):
+    def __init__(self, delimiter, preload='distilgpt2'):
         super().__init__()
         if isinstance(preload, str):
             self.gpt2 = GPT2LMHeadModel.from_pretrained(preload)
         else:
             self.gpt2 = preload
         self.vocab_size = self.gpt2.config.vocab_size
-
-        tokenizer = GPT2Tokenizer.from_pretrained(preload)
-        self.delimiter = torch.tensor(tokenizer.encode("TL;DR:")) # Size([4])
+        self.delimiter = delimiter # Size([4])
 
     def forward(self, src, src_mask, max_len, start_symbol, gumbel_tau=1., return_index=False, keep_bos=False):
         delim = self.delimiter.repeat((src.size(0),1)).type_as(src)
